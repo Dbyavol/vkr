@@ -66,6 +66,13 @@ class StorageAdapter:
             self.client.put_object(Bucket=self.bucket_name, Key=key, Body=body, **(extra_args or {}))
         return key, checksum
 
+    def download(self, key: str) -> bytes:
+        if self.local_mode:
+            return (self.base_dir / key).read_bytes()
+        assert self.client is not None
+        response = self.client.get_object(Bucket=self.bucket_name, Key=key)
+        return response["Body"].read()
+
     def presigned_download_url(self, key: str, expires_in: int = 3600) -> str:
         if self.local_mode:
             return str((self.base_dir / key).resolve())

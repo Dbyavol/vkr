@@ -36,7 +36,6 @@ const stages: Array<{ id: StageId; title: string; caption: string }> = [
   { id: "preprocessing", title: "Подготовка", caption: "Очистка и кодирование" },
   { id: "criteria", title: "Критерии", caption: "Веса и направления" },
   { id: "results", title: "Результаты", caption: "Рейтинг и отчет" },
-  { id: "history", title: "История", caption: "Сохраненные сравнения" },
   { id: "admin", title: "Админ", caption: "Дэшборд системы" },
 ];
 
@@ -177,10 +176,217 @@ function formatMetricValue(value: unknown) {
   return String(value);
 }
 
+const SUMMARY_LABELS: Record<string, string> = {
+  objects_count: "Количество объектов",
+  criteria_count: "Количество критериев",
+  weights_sum: "Сумма весов",
+  best_object_id: "Лучший объект",
+  best_score: "Лучшая оценка",
+  normalization_notes: "Нормализация",
+  mode: "Режим анализа",
+  target_object_id: "Целевой объект",
+  confidence_score: "Доверие к расчету",
+  confidence_notes: "Замечания к качеству",
+  sensitivity: "Чувствительность",
+  ranking_stability_note: "Устойчивость рейтинга",
+  analog_groups: "Группы аналогов",
+  dominance_pairs: "Доминирование объектов",
+};
+
+const SUMMARY_CARD_KEYS = [
+  "objects_count",
+  "criteria_count",
+  "weights_sum",
+  "best_object_id",
+  "best_score",
+  "mode",
+  "target_object_id",
+  "confidence_score",
+];
+
+const DIRECTION_LABELS: Record<string, string> = {
+  maximize: "максимизация",
+  minimize: "минимизация",
+  target: "близость к целевому значению",
+};
+
+const MODE_LABELS: Record<string, string> = {
+  rating: "рейтинг объектов",
+  analog_search: "поиск аналогов",
+};
+
+const SERVICE_LABELS: Record<string, string> = {
+  auth: "Авторизация",
+  import: "Импорт",
+  preprocessing: "Предобработка",
+  analysis: "Анализ",
+  storage: "Хранилище",
+};
+
+const STATUS_LABELS: Record<string, string> = {
+  ok: "работает",
+  error: "ошибка",
+  active: "активен",
+  blocked: "заблокирован",
+  completed: "завершен",
+  warning: "предупреждение",
+  critical: "критично",
+  info: "информация",
+};
+
+const QUALITY_TEXT: Record<string, string> = {
+  good: "хорошее",
+  medium: "среднее",
+  poor: "низкое",
+  "Ready for analysis": "Готов к анализу",
+  "Risky, preprocessing is recommended": "Есть риски, рекомендуется предобработка",
+  "Not ready for reliable analysis": "Не готов к надежному анализу",
+  "No fields are currently suitable for comparative analysis.": "Нет полей, подходящих для сравнительного анализа.",
+  "Dataset has fewer than 3 analytic fields, comparison may be unstable.": "В датасете меньше 3 аналитических полей, сравнение может быть неустойчивым.",
+  "Some non-numeric fields look like identifiers or free text and are weak criteria.": "Некоторые нечисловые поля похожи на идентификаторы или свободный текст и слабо подходят как критерии.",
+  "Dataset is very small; analog search and statistics may be fragile.": "Датасет очень мал, поиск аналогов и статистика могут быть неустойчивыми.",
+};
+
+const FIELD_TYPE_LABELS: Record<string, string> = {
+  numeric: "числовой",
+  categorical: "категориальный",
+  binary: "бинарный",
+  text: "текстовый",
+};
+
+const METHOD_LABELS: Record<string, string> = {
+  none: "не применять",
+  median: "заполнить медианой",
+  mean: "заполнить средним",
+  mode: "заполнить модой",
+  drop_row: "удалить строку",
+  constant: "задать константу",
+  iqr_clip: "ограничить по IQR",
+  iqr_remove: "удалить по IQR",
+  zscore_clip: "ограничить по z-score",
+  zscore_remove: "удалить по z-score",
+  minmax: "min-max",
+  zscore: "z-score",
+  robust: "устойчивая",
+  log_minmax: "логарифм + min-max",
+};
+
+function translateStatus(value: string) {
+  return STATUS_LABELS[value] ?? value;
+}
+
+function fieldTypeLabel(value: string) {
+  return FIELD_TYPE_LABELS[value] ?? value;
+}
+
+function methodLabel(value: string) {
+  return METHOD_LABELS[value] ?? value;
+}
+
+function translateQualityText(value: string) {
+  if (QUALITY_TEXT[value]) return QUALITY_TEXT[value];
+  return value
+    .replace(/^Dataset contains missing values in (\d+) fields\.$/, "Датасет содержит пропуски в $1 полях.")
+    .replace(/^IQR-based profiling found possible outliers in (\d+) numeric fields\.$/, "Профилирование по IQR нашло возможные выбросы в $1 числовых полях.");
+}
+
+function labelForSummaryKey(key: string) {
+  return SUMMARY_LABELS[key] ?? key.replace(/_/g, " ");
+}
+
+function formatDirection(value: string) {
+  return DIRECTION_LABELS[value] ?? value;
+}
+
+function formatAnalysisMode(value: unknown) {
+  return MODE_LABELS[String(value)] ?? String(value ?? "-");
+}
+
+function translateAnalysisText(value: unknown) {
+  return String(value ?? "-")
+    .replace("Ranking is stable: the leader is ahead of the second object by", "Рейтинг устойчив: лидер опережает второй объект на")
+    .replace("Ranking is moderately stable: the leader margin is", "Рейтинг умеренно устойчив: отрыв лидера составляет")
+    .replace("Ranking is sensitive: the leader margin is only", "Рейтинг чувствителен: отрыв лидера составляет только")
+    .replace("Dataset is sufficiently complete for the selected criteria.", "Датасет достаточно полный для выбранных критериев.")
+    .replace("Very close analogs", "Очень близкие аналоги")
+    .replace("Moderately close analogs", "Умеренно близкие аналоги")
+    .replace("Weak analogs", "Слабые аналоги")
+    .replace("Criterion has no spread and does not change ranking.", "Критерий не имеет разброса и не влияет на ранжирование.")
+    .replace("Ranking is highly sensitive to this criterion.", "Рейтинг сильно чувствителен к этому критерию.")
+    .replace("Criterion has a moderate influence on ranking.", "Критерий умеренно влияет на ранжирование.")
+    .replace("Criterion has a low influence with current weights.", "При текущих весах критерий влияет слабо.");
+}
+
+function formatSummaryValue(key: string, value: unknown) {
+  if (value === null || value === undefined) return "-";
+  if (key === "mode") return formatAnalysisMode(value);
+  if (key === "normalization_notes" || key === "confidence_notes") {
+    return Array.isArray(value) && value.length ? value.map(translateAnalysisText).join("; ") : "нет замечаний";
+  }
+  if (Array.isArray(value)) return `${value.length} записей`;
+  if (typeof value === "number") return Number.isInteger(value) ? String(value) : value.toFixed(4);
+  if (typeof value === "object") return "см. детальный раздел";
+  return translateAnalysisText(value);
+}
+
+function summaryCardEntries(summary: Record<string, unknown>) {
+  return SUMMARY_CARD_KEYS
+    .filter((key) => key in summary)
+    .map((key) => [key, summary[key]] as const);
+}
+
+function escapeHtml(value: unknown) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
 type HistorySummary = {
   analysis_summary?: Record<string, unknown>;
   ranking?: Array<{ object_id: string; title: string; score: number; rank: number }>;
 };
+
+type HistoryParameters = {
+  fields?: FieldConfig[];
+  criteria?: CriterionConfig[];
+  target_row_id?: string | null;
+  analysis_mode?: AnalysisMode;
+  project_id?: number | null;
+  scenario_title?: string | null;
+};
+
+type SavedWorkflowState = {
+  activeStage?: StageId;
+  datasetFileId?: number | null;
+  preview?: PreviewResponse | null;
+  profile?: FieldProfile[];
+  quality?: DatasetQualityReport | null;
+  recommendedWeights?: Record<string, number>;
+  weightNotes?: string[];
+  fields?: FieldConfig[];
+  criteria?: CriterionConfig[];
+  analysisMode?: AnalysisMode;
+  targetRowId?: string;
+  result?: PipelineResult | null;
+  activeProjectId?: number | null;
+  historyProjectFilter?: number | "all";
+  scenarioTitle?: string;
+  sourceFilename?: string;
+};
+
+const WORKFLOW_STORAGE_KEY = "comparison_workflow_state";
+
+function readSavedWorkflow(): SavedWorkflowState {
+  try {
+    const stored = localStorage.getItem(WORKFLOW_STORAGE_KEY);
+    return stored ? (JSON.parse(stored) as SavedWorkflowState) : {};
+  } catch {
+    return {};
+  }
+}
 
 function parseHistorySummary(item?: ComparisonHistoryItem): HistorySummary {
   if (!item) return {};
@@ -188,6 +394,14 @@ function parseHistorySummary(item?: ComparisonHistoryItem): HistorySummary {
     return JSON.parse(item.summary_json) as HistorySummary;
   } catch {
     return {};
+  }
+}
+
+function parseHistoryParameters(item: ComparisonHistoryItem): HistoryParameters | null {
+  try {
+    return JSON.parse(item.parameters_json) as HistoryParameters;
+  } catch {
+    return null;
   }
 }
 
@@ -207,9 +421,9 @@ function buildHtmlReport(result: PipelineResult, criteria: CriterionConfig[]) {
       (item) => `
         <tr>
           <td>${item.rank}</td>
-          <td>${item.title}</td>
+          <td>${escapeHtml(item.title)}</td>
           <td>${item.score.toFixed(4)}</td>
-          <td>${item.explanation}</td>
+          <td>${escapeHtml(translateAnalysisText(item.explanation))}</td>
         </tr>`,
     )
     .join("");
@@ -217,12 +431,42 @@ function buildHtmlReport(result: PipelineResult, criteria: CriterionConfig[]) {
     .map(
       (item) => `
         <tr>
-          <td>${item.name}</td>
-          <td>${item.key}</td>
+          <td>${escapeHtml(item.name)}</td>
+          <td>${escapeHtml(item.key)}</td>
           <td>${item.weight}</td>
-          <td>${item.direction}</td>
+          <td>${escapeHtml(formatDirection(item.direction))}</td>
         </tr>`,
     )
+    .join("");
+  const summaryCards = summaryCardEntries(result.analysis_summary)
+    .map(([key, value]) => `<div class="metric"><strong>${escapeHtml(labelForSummaryKey(key))}</strong><br />${escapeHtml(formatSummaryValue(key, value))}</div>`)
+    .join("");
+  const confidenceNotes = summaryList<string>(result.analysis_summary, "confidence_notes")
+    .map((item) => `<li>${escapeHtml(translateAnalysisText(item))}</li>`)
+    .join("");
+  const sensitivityRows = summaryList<{ key: string; name: string; weight: number; normalized_range: number; sensitivity_index: number; note: string }>(
+    result.analysis_summary,
+    "sensitivity",
+  )
+    .map(
+      (item) => `
+        <tr>
+          <td>${escapeHtml(item.name)}</td>
+          <td>${item.weight.toFixed(4)}</td>
+          <td>${item.normalized_range.toFixed(4)}</td>
+          <td>${item.sensitivity_index.toFixed(4)}</td>
+          <td>${escapeHtml(translateAnalysisText(item.note))}</td>
+        </tr>`,
+    )
+    .join("");
+  const analogRows = summaryList<{ label: string; object_ids: string[] }>(result.analysis_summary, "analog_groups")
+    .map((group) => `<tr><td>${escapeHtml(translateAnalysisText(group.label))}</td><td>${group.object_ids.map((id) => `№${escapeHtml(id)}`).join(", ")}</td></tr>`)
+    .join("");
+  const dominanceRows = summaryList<{ dominant_object_id: string; dominated_object_id: string; criteria_count: number }>(
+    result.analysis_summary,
+    "dominance_pairs",
+  )
+    .map((item) => `<tr><td>№${escapeHtml(item.dominant_object_id)}</td><td>№${escapeHtml(item.dominated_object_id)}</td><td>${item.criteria_count}</td></tr>`)
     .join("");
   return `<!doctype html>
 <html lang="ru">
@@ -236,17 +480,21 @@ function buildHtmlReport(result: PipelineResult, criteria: CriterionConfig[]) {
     th, td { border-bottom: 1px solid #d7dde8; padding: 10px; text-align: left; vertical-align: top; }
     th { background: #f2f5f9; }
     .metric { display: inline-block; margin: 8px 16px 8px 0; padding: 12px 16px; background: #f6f8fb; border-radius: 12px; }
+    .note { padding: 14px 16px; border-radius: 12px; background: #eef7ff; }
   </style>
 </head>
 <body>
   <h1>Отчет сравнительного анализа</h1>
   <p>Сформировано: ${new Date().toLocaleString("ru-RU")}</p>
   <h2>Сводка</h2>
-  ${Object.entries(result.analysis_summary)
-    .map(([key, value]) => `<div class="metric"><strong>${key}</strong><br />${String(value)}</div>`)
-    .join("")}
+  ${summaryCards}
+  <p class="note">${escapeHtml(translateAnalysisText(result.analysis_summary.ranking_stability_note ?? "Нет данных об устойчивости рейтинга."))}</p>
+  ${confidenceNotes ? `<h3>Замечания к расчету</h3><ul>${confidenceNotes}</ul>` : ""}
   <h2>Критерии</h2>
-  <table><thead><tr><th>Название</th><th>Поле</th><th>Вес</th><th>Направление</th></tr></thead><tbody>${criteriaRows}</tbody></table>
+  <table><thead><tr><th>Название</th><th>Поле датасета</th><th>Вес</th><th>Направление</th></tr></thead><tbody>${criteriaRows}</tbody></table>
+  ${sensitivityRows ? `<h2>Чувствительность критериев</h2><table><thead><tr><th>Критерий</th><th>Вес</th><th>Разброс</th><th>Индекс</th><th>Пояснение</th></tr></thead><tbody>${sensitivityRows}</tbody></table>` : ""}
+  ${analogRows ? `<h2>Группы аналогов</h2><table><thead><tr><th>Группа</th><th>Объекты</th></tr></thead><tbody>${analogRows}</tbody></table>` : ""}
+  ${dominanceRows ? `<h2>Доминирование объектов</h2><table><thead><tr><th>Доминирующий объект</th><th>Уступающий объект</th><th>Критериев</th></tr></thead><tbody>${dominanceRows}</tbody></table>` : ""}
   <h2>Рейтинг</h2>
   <table><thead><tr><th>Место</th><th>Объект</th><th>Оценка</th><th>Объяснение</th></tr></thead><tbody>${rows}</tbody></table>
 </body>
@@ -254,7 +502,8 @@ function buildHtmlReport(result: PipelineResult, criteria: CriterionConfig[]) {
 }
 
 export function App() {
-  const [activeStage, setActiveStage] = useState<StageId>("data");
+  const savedWorkflow = useMemo(readSavedWorkflow, []);
+  const [activeStage, setActiveStage] = useState<StageId>(savedWorkflow.activeStage ?? "data");
   const [token, setToken] = useState(() => localStorage.getItem("access_token") ?? "");
   const [user, setUser] = useState<AuthUser | null>(() => {
     const stored = localStorage.getItem("auth_user");
@@ -262,30 +511,35 @@ export function App() {
   });
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [authModalOpen, setAuthModalOpen] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [reportPreviewOpen, setReportPreviewOpen] = useState(false);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [authEmail, setAuthEmail] = useState("admin@example.com");
   const [authPassword, setAuthPassword] = useState("admin12345");
   const [authName, setAuthName] = useState("Пользователь");
   const [history, setHistory] = useState<ComparisonHistoryItem[]>([]);
   const [projects, setProjects] = useState<ProjectItem[]>([]);
-  const [activeProjectId, setActiveProjectId] = useState<number | null>(null);
-  const [historyProjectFilter, setHistoryProjectFilter] = useState<number | "all">("all");
+  const [activeProjectId, setActiveProjectId] = useState<number | null>(savedWorkflow.activeProjectId ?? null);
+  const [historyProjectFilter, setHistoryProjectFilter] = useState<number | "all">(savedWorkflow.historyProjectFilter ?? "all");
   const [historyCompareIds, setHistoryCompareIds] = useState<number[]>([]);
   const [newProjectName, setNewProjectName] = useState("Новый проект сравнения");
-  const [scenarioTitle, setScenarioTitle] = useState("Сценарий сравнительного анализа");
+  const [scenarioTitle, setScenarioTitle] = useState(savedWorkflow.scenarioTitle ?? "Сценарий сравнительного анализа");
   const [systemDashboard, setSystemDashboard] = useState<SystemDashboard | null>(null);
   const [adminStats, setAdminStats] = useState<AdminStats | null>(null);
   const [adminUsers, setAdminUsers] = useState<AuthUser[]>([]);
   const [file, setFile] = useState<File | null>(null);
-  const [preview, setPreview] = useState<PreviewResponse | null>(null);
-  const [profile, setProfile] = useState<FieldProfile[]>([]);
-  const [quality, setQuality] = useState<DatasetQualityReport | null>(null);
-  const [recommendedWeights, setRecommendedWeights] = useState<Record<string, number>>({});
-  const [weightNotes, setWeightNotes] = useState<string[]>([]);
-  const [fields, setFields] = useState<FieldConfig[]>([]);
-  const [criteria, setCriteria] = useState<CriterionConfig[]>([]);
-  const [analysisMode, setAnalysisMode] = useState<AnalysisMode>("analog_search");
-  const [targetRowId, setTargetRowId] = useState("");
-  const [result, setResult] = useState<PipelineResult | null>(null);
+  const [datasetFileId, setDatasetFileId] = useState<number | null>(savedWorkflow.datasetFileId ?? null);
+  const [sourceFilename, setSourceFilename] = useState(savedWorkflow.sourceFilename ?? "");
+  const [preview, setPreview] = useState<PreviewResponse | null>(savedWorkflow.preview ?? null);
+  const [profile, setProfile] = useState<FieldProfile[]>(savedWorkflow.profile ?? []);
+  const [quality, setQuality] = useState<DatasetQualityReport | null>(savedWorkflow.quality ?? null);
+  const [recommendedWeights, setRecommendedWeights] = useState<Record<string, number>>(savedWorkflow.recommendedWeights ?? {});
+  const [weightNotes, setWeightNotes] = useState<string[]>(savedWorkflow.weightNotes ?? []);
+  const [fields, setFields] = useState<FieldConfig[]>(savedWorkflow.fields ?? []);
+  const [criteria, setCriteria] = useState<CriterionConfig[]>(savedWorkflow.criteria ?? []);
+  const [analysisMode, setAnalysisMode] = useState<AnalysisMode>(savedWorkflow.analysisMode ?? "analog_search");
+  const [targetRowId, setTargetRowId] = useState(savedWorkflow.targetRowId ?? "");
+  const [result, setResult] = useState<PipelineResult | null>(savedWorkflow.result ?? null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -309,6 +563,7 @@ export function App() {
   const comparedHistory = historyCompareIds
     .map((id) => history.find((item) => item.id === id))
     .filter((item): item is ComparisonHistoryItem => Boolean(item));
+  const reportHtml = useMemo(() => (result ? buildHtmlReport(result, criteria) : ""), [result, criteria]);
 
   const visibleStages = user?.role === "admin" ? stages : stages.filter((stage) => stage.id !== "admin");
 
@@ -317,6 +572,7 @@ export function App() {
     setUser(nextUser);
     localStorage.setItem("access_token", nextToken);
     localStorage.setItem("auth_user", JSON.stringify(nextUser));
+    setAuthError(null);
     setAuthModalOpen(false);
   }
 
@@ -326,21 +582,80 @@ export function App() {
     setHistory([]);
     setAdminStats(null);
     setAdminUsers([]);
+    setUserMenuOpen(false);
     localStorage.removeItem("access_token");
     localStorage.removeItem("auth_user");
   }
 
+  function resetWorkflow() {
+    setActiveStage("data");
+    setFile(null);
+    setDatasetFileId(null);
+    setSourceFilename("");
+    setPreview(null);
+    setProfile([]);
+    setQuality(null);
+    setRecommendedWeights({});
+    setWeightNotes([]);
+    setFields([]);
+    setCriteria([]);
+    setAnalysisMode("analog_search");
+    setTargetRowId("");
+    setResult(null);
+    setActiveProjectId(null);
+    setHistoryProjectFilter("all");
+    setHistoryCompareIds([]);
+    setScenarioTitle("Сценарий сравнительного анализа");
+    setReportPreviewOpen(false);
+    setError(null);
+    localStorage.removeItem(WORKFLOW_STORAGE_KEY);
+  }
+
+  function openUserSection(stage: StageId) {
+    setUserMenuOpen(false);
+    if (stage === "history") {
+      void refreshHistory(true);
+      return;
+    }
+    if (stage === "projects") {
+      void refreshHistory(false);
+    }
+    setActiveStage(stage);
+  }
+
+  function validateAuthForm() {
+    const email = authEmail.trim();
+    const password = authPassword.trim();
+    const name = authName.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return "Введите корректный email.";
+    }
+    if (password.length < 6) {
+      return "Пароль должен содержать минимум 6 символов.";
+    }
+    if (authMode === "register" && name.length < 2) {
+      return "Имя должно содержать минимум 2 символа.";
+    }
+    return null;
+  }
+
   async function handleAuthSubmit() {
+    const validationError = validateAuthForm();
+    if (validationError) {
+      setAuthError(validationError);
+      return;
+    }
     setLoading(true);
     setError(null);
+    setAuthError(null);
     try {
       const response = authMode === "login"
-        ? await login(authEmail, authPassword)
-        : await register(authName, authEmail, authPassword);
+        ? await login(authEmail.trim(), authPassword)
+        : await register(authName.trim(), authEmail.trim(), authPassword);
       persistAuth(response.access_token, response.user);
       setActiveStage("data");
-    } catch (authError) {
-      setError(authError instanceof Error ? authError.message : "Ошибка авторизации");
+    } catch (nextAuthError) {
+      setAuthError(nextAuthError instanceof Error ? nextAuthError.message : "Не удалось выполнить вход или регистрацию.");
     } finally {
       setLoading(false);
     }
@@ -349,6 +664,45 @@ export function App() {
   useEffect(() => {
     void restoreSession();
   }, []);
+
+  useEffect(() => {
+    const state: SavedWorkflowState = {
+      activeStage,
+      datasetFileId,
+      preview,
+      profile,
+      quality,
+      recommendedWeights,
+      weightNotes,
+      fields,
+      criteria,
+      analysisMode,
+      targetRowId,
+      result,
+      activeProjectId,
+      historyProjectFilter,
+      scenarioTitle,
+      sourceFilename,
+    };
+    localStorage.setItem(WORKFLOW_STORAGE_KEY, JSON.stringify(state));
+  }, [
+    activeStage,
+    datasetFileId,
+    preview,
+    profile,
+    quality,
+    recommendedWeights,
+    weightNotes,
+    fields,
+    criteria,
+    analysisMode,
+    targetRowId,
+    result,
+    activeProjectId,
+    historyProjectFilter,
+    scenarioTitle,
+    sourceFilename,
+  ]);
 
   async function refreshHistory(openStage = true) {
     if (!user) return;
@@ -416,6 +770,26 @@ export function App() {
     });
   }
 
+  function applyHistoryScenario(item: ComparisonHistoryItem) {
+    const parameters = parseHistoryParameters(item);
+    if (!parameters) {
+      setError("Не удалось применить сценарий: сохраненные параметры повреждены.");
+      return;
+    }
+    if (Array.isArray(parameters.fields)) {
+      setFields(parameters.fields);
+    }
+    if (Array.isArray(parameters.criteria)) {
+      setCriteria(parameters.criteria);
+    }
+    setTargetRowId(parameters.target_row_id ?? "");
+    setAnalysisMode(parameters.analysis_mode === "rating" ? "rating" : "analog_search");
+    setActiveProjectId(parameters.project_id ?? item.project_id ?? null);
+    setScenarioTitle(`${item.title} (повтор)`);
+    setActiveStage("criteria");
+    setError(file && preview ? null : "Параметры сценария применены. Для повторного расчета загрузите исходный файл на этапе «Данные».");
+  }
+
   async function restoreSession() {
     if (!token) return;
     try {
@@ -433,6 +807,8 @@ export function App() {
     setResult(null);
     try {
       const response = await profileFile(file);
+      setDatasetFileId(response.dataset_file_id ?? null);
+      setSourceFilename(file.name);
       const inferredFields = response.profile.fields.map((field) => ({
         ...field.recommended_config,
         missing_strategy: "none",
@@ -457,7 +833,7 @@ export function App() {
   }
 
   async function handleRun() {
-    if (!file) return;
+    if (!file && !datasetFileId) return;
     setLoading(true);
     setError(null);
     try {
@@ -470,6 +846,9 @@ export function App() {
         token || undefined,
         activeProjectId,
         scenarioTitle,
+        undefined,
+        datasetFileId,
+        sourceFilename || file?.name,
       );
       setResult(response);
       setActiveStage("results");
@@ -557,7 +936,7 @@ export function App() {
 
   function exportHtmlReport() {
     if (!result) return;
-    downloadBlob("comparison-report.html", buildHtmlReport(result, criteria), "text/html;charset=utf-8");
+    downloadBlob("comparison-report.html", reportHtml, "text/html;charset=utf-8");
   }
 
   async function exportDocxReport() {
@@ -619,33 +998,42 @@ export function App() {
       <main className="workspace">
         <header className="topbar">
           <div>
-            <p className="eyebrow">Decision intelligence workflow</p>
+            <p className="eyebrow">Рабочий процесс аналитического сравнения</p>
             <h1>Сравнительный анализ объектов</h1>
             <p className="subtitle">
               Полный рабочий процесс: загрузка данных, подготовка признаков, настройка весов и выпуск отчета.
             </p>
           </div>
           <div className="topbar-actions">
-            <button className="ghost-button" onClick={() => setActiveStage("data")}>Новый расчет</button>
-            {user ? <button className="ghost-button" onClick={() => refreshHistory()}>История</button> : null}
-            {user ? <button className="ghost-button" onClick={() => setActiveStage("projects")}>Проекты</button> : null}
-            <button onClick={handleRun} disabled={!file || !preview || criteria.length === 0 || loading}>
+            <button className="ghost-button" onClick={resetWorkflow}>Новый расчет</button>
+            <button onClick={handleRun} disabled={(!file && !datasetFileId) || !preview || criteria.length === 0 || loading}>
               {loading ? "Выполняется..." : "Запустить расчет"}
             </button>
             {user ? (
               <div className="user-menu">
-                <div className="avatar">{user.full_name.slice(0, 1).toUpperCase()}</div>
-                <div className="user-meta">
-                  <strong>{user.full_name}</strong>
-                  <span>{user.role}</span>
-                </div>
-                <button className="ghost-button compact" onClick={logout}>Выйти</button>
+                <button className="user-menu-trigger" onClick={() => setUserMenuOpen((value) => !value)}>
+                  <span className="avatar">{user.full_name.slice(0, 1).toUpperCase()}</span>
+                  <span className="user-meta">
+                    <strong>{user.full_name}</strong>
+                    <span>{user.role === "admin" ? "администратор" : "пользователь"}</span>
+                  </span>
+                  <span className="menu-caret">▾</span>
+                </button>
+                {userMenuOpen ? (
+                  <div className="user-dropdown">
+                    <button onClick={() => openUserSection("projects")}>Проекты</button>
+                    <button onClick={() => openUserSection("history")}>История сравнений</button>
+                    {user.role === "admin" ? <button onClick={() => openUserSection("admin")}>Админ-панель</button> : null}
+                    <button onClick={logout}>Выйти</button>
+                  </div>
+                ) : null}
               </div>
             ) : (
               <button
                 className="login-button"
                 onClick={() => {
                   setAuthMode("login");
+                  setAuthError(null);
                   setAuthModalOpen(true);
                 }}
               >
@@ -670,9 +1058,28 @@ export function App() {
               </div>
               <div className="upload-card">
                 <label className="dropzone">
-                  <input type="file" accept=".csv,.xlsx,.json" onChange={(event) => setFile(event.target.files?.[0] ?? null)} />
+                  <input
+                    type="file"
+                    accept=".csv,.xlsx,.json"
+                    onChange={(event) => {
+                      const selectedFile = event.target.files?.[0] ?? null;
+                      setFile(selectedFile);
+                      setDatasetFileId(null);
+                      if (selectedFile) {
+                        setSourceFilename(selectedFile.name);
+                      }
+                    }}
+                  />
                   <span>Выберите файл или перетащите его сюда</span>
-                  <strong>{file ? file.name : "Файл не выбран"}</strong>
+                  <strong>
+                    {file
+                      ? file.name
+                      : sourceFilename
+                        ? datasetFileId
+                          ? `${sourceFilename} · файл сохранен в хранилище`
+                          : `${sourceFilename} · выберите файл заново для повторного расчета`
+                        : "Файл не выбран"}
+                  </strong>
                 </label>
                 <button className="wide-button" onClick={handlePreview} disabled={!file || loading}>
                   {loading ? "Анализируем файл..." : "Построить предпросмотр"}
@@ -781,28 +1188,28 @@ export function App() {
                 {quality ? (
                   <div className={`quality-card ${quality.level}`}>
                     <div className="quality-score">
-                      <span>Data quality</span>
+                      <span>Качество данных</span>
                       <strong>{quality.score.toFixed(0)}</strong>
-                      <small>{quality.readiness_label}</small>
+                      <small>{translateQualityText(quality.readiness_label)}</small>
                     </div>
                     <div className="quality-body">
                       <div className="quality-metrics">
-                        <div><span>Analytic fields</span><strong>{quality.analytic_fields_count}</strong></div>
-                        <div><span>Missing values</span><strong>{quality.total_missing_values}</strong></div>
-                        <div><span>IQR outliers</span><strong>{quality.total_outliers_iqr}</strong></div>
-                        <div><span>Text fields</span><strong>{quality.text_fields_count}</strong></div>
+                        <div><span>Аналитических полей</span><strong>{quality.analytic_fields_count}</strong></div>
+                        <div><span>Пропусков</span><strong>{quality.total_missing_values}</strong></div>
+                        <div><span>Выбросов IQR</span><strong>{quality.total_outliers_iqr}</strong></div>
+                        <div><span>Текстовых полей</span><strong>{quality.text_fields_count}</strong></div>
                       </div>
                       {quality.issues.length > 0 ? (
                         <div className="quality-issues">
                           {quality.issues.slice(0, 4).map((issue) => (
                             <p key={issue.code}>
-                              <b>{issue.severity}</b> · {issue.message}
-                              {issue.affected_fields.length ? ` Fields: ${issue.affected_fields.slice(0, 4).join(", ")}` : ""}
+                              <b>{translateStatus(issue.severity)}</b> · {translateQualityText(issue.message)}
+                              {issue.affected_fields.length ? ` Поля: ${issue.affected_fields.slice(0, 4).join(", ")}` : ""}
                             </p>
                           ))}
                         </div>
                       ) : (
-                        <p className="quality-ok">No serious data quality issues found.</p>
+                        <p className="quality-ok">Серьезных проблем с качеством данных не найдено.</p>
                       )}
                     </div>
                   </div>
@@ -831,7 +1238,7 @@ export function App() {
                     <div className="field-card-head">
                       <div>
                         <strong>{field.key}</strong>
-                        <span>{field.field_type}</span>
+                        <span>{fieldTypeLabel(field.field_type)}</span>
                       </div>
                       <label className="switch">
                         <input
@@ -876,41 +1283,41 @@ export function App() {
                           value={field.field_type}
                           onChange={(event) => updateField(index, { field_type: event.target.value as FieldConfig["field_type"] })}
                         >
-                          <option value="numeric">numeric</option>
-                          <option value="categorical">categorical</option>
-                          <option value="binary">binary</option>
-                          <option value="text">text</option>
+                          <option value="numeric">{fieldTypeLabel("numeric")}</option>
+                          <option value="categorical">{fieldTypeLabel("categorical")}</option>
+                          <option value="binary">{fieldTypeLabel("binary")}</option>
+                          <option value="text">{fieldTypeLabel("text")}</option>
                         </select>
                       </label>
                       <label>
                         Пропуски
                         <select value={field.missing_strategy} onChange={(event) => updateField(index, { missing_strategy: event.target.value })}>
-                          <option value="none">none</option>
-                          <option value="median">median</option>
-                          <option value="mean">mean</option>
-                          <option value="mode">mode</option>
-                          <option value="drop_row">drop_row</option>
-                          <option value="constant">constant</option>
+                          <option value="none">{methodLabel("none")}</option>
+                          <option value="median">{methodLabel("median")}</option>
+                          <option value="mean">{methodLabel("mean")}</option>
+                          <option value="mode">{methodLabel("mode")}</option>
+                          <option value="drop_row">{methodLabel("drop_row")}</option>
+                          <option value="constant">{methodLabel("constant")}</option>
                         </select>
                       </label>
                       <label>
                         Выбросы
                         <select value={field.outlier_method} onChange={(event) => updateField(index, { outlier_method: event.target.value })}>
-                          <option value="none">none</option>
-                          <option value="iqr_clip">iqr_clip</option>
-                          <option value="iqr_remove">iqr_remove</option>
-                          <option value="zscore_clip">zscore_clip</option>
-                          <option value="zscore_remove">zscore_remove</option>
+                          <option value="none">{methodLabel("none")}</option>
+                          <option value="iqr_clip">{methodLabel("iqr_clip")}</option>
+                          <option value="iqr_remove">{methodLabel("iqr_remove")}</option>
+                          <option value="zscore_clip">{methodLabel("zscore_clip")}</option>
+                          <option value="zscore_remove">{methodLabel("zscore_remove")}</option>
                         </select>
                       </label>
                       <label>
                         Нормализация
                         <select value={field.normalization} onChange={(event) => updateField(index, { normalization: event.target.value })}>
-                          <option value="none">none</option>
-                          <option value="minmax">minmax</option>
-                          <option value="zscore">zscore</option>
-                          <option value="robust">robust</option>
-                          <option value="log_minmax">log_minmax</option>
+                          <option value="none">{methodLabel("none")}</option>
+                          <option value="minmax">{methodLabel("minmax")}</option>
+                          <option value="zscore">{methodLabel("zscore")}</option>
+                          <option value="robust">{methodLabel("robust")}</option>
+                          <option value="log_minmax">{methodLabel("log_minmax")}</option>
                         </select>
                       </label>
                     </div>
@@ -1075,6 +1482,7 @@ export function App() {
                   </p>
                 </div>
                 <div className="report-actions">
+                  <button className="ghost-button" onClick={() => setReportPreviewOpen(true)} disabled={!result}>Предпросмотр</button>
                   <button className="ghost-button" onClick={exportJsonReport} disabled={!result}>JSON</button>
                   <button className="ghost-button" onClick={exportHtmlReport} disabled={!result}>HTML</button>
                   <button onClick={exportDocxReport} disabled={!result || loading}>DOCX</button>
@@ -1084,16 +1492,16 @@ export function App() {
               {result ? (
                 <>
                   <div className="metric-row">
-                    {Object.entries(result.analysis_summary).map(([key, value]) => (
+                    {summaryCardEntries(result.analysis_summary).map(([key, value]) => (
                       <div className="metric" key={key}>
-                        <span>{key}</span>
-                        <strong>{formatMetricValue(value)}</strong>
+                        <span>{labelForSummaryKey(key)}</span>
+                        <strong>{formatSummaryValue(key, value)}</strong>
                       </div>
                     ))}
                   </div>
                   <div className="insight-grid">
                     <div className="insight-card">
-                      <span className="section-kicker">Explainability</span>
+                      <span className="section-kicker">Объяснимость</span>
                       <h3>Чувствительность критериев</h3>
                       {summaryList<{ key: string; name: string; sensitivity_index: number; note: string }>(result.analysis_summary, "sensitivity")
                         .slice(0, 4)
@@ -1101,26 +1509,26 @@ export function App() {
                           <div className="insight-row" key={item.key}>
                             <span>{item.name}</span>
                             <strong>{Number(item.sensitivity_index).toFixed(4)}</strong>
-                            <small>{item.note}</small>
+                            <small>{translateAnalysisText(item.note)}</small>
                           </div>
                         ))}
                     </div>
                     <div className="insight-card">
-                      <span className="section-kicker">Reliability</span>
+                      <span className="section-kicker">Надежность</span>
                       <h3>Доверие и устойчивость</h3>
-                      <p>{String(result.analysis_summary.ranking_stability_note ?? "Нет данных об устойчивости рейтинга.")}</p>
+                      <p>{translateAnalysisText(result.analysis_summary.ranking_stability_note ?? "Нет данных об устойчивости рейтинга.")}</p>
                       {summaryList<string>(result.analysis_summary, "confidence_notes").map((item, index) => (
-                        <p key={`${item}-${index}`}>{item}</p>
+                        <p key={`${item}-${index}`}>{translateAnalysisText(item)}</p>
                       ))}
                     </div>
                     <div className="insight-card">
-                      <span className="section-kicker">Analogs</span>
+                      <span className="section-kicker">Аналоги</span>
                       <h3>Группы аналогов</h3>
                       {summaryList<{ label: string; object_ids: string[] }>(result.analysis_summary, "analog_groups").length ? (
                         summaryList<{ label: string; object_ids: string[] }>(result.analysis_summary, "analog_groups").map((group) => (
                           <div className="group-chip" key={group.label}>
-                            <strong>{group.label}</strong>
-                            <span>{group.object_ids.length} objects</span>
+                            <strong>{translateAnalysisText(group.label)}</strong>
+                            <span>{group.object_ids.length} объектов</span>
                           </div>
                         ))
                       ) : (
@@ -1141,7 +1549,7 @@ export function App() {
                                 : item.score.toFixed(4)}
                             </strong>
                           </div>
-                          <p>{item.explanation}</p>
+                          <p>{translateAnalysisText(item.explanation)}</p>
                           <div className="bar-list">
                             {item.contributions.map((contribution) => (
                               <div className="bar-item" key={contribution.key}>
@@ -1171,7 +1579,7 @@ export function App() {
           <section className="panel">
             <div className="panel-head">
               <div>
-                <span className="section-kicker">Workspace</span>
+                <span className="section-kicker">Рабочая область</span>
                 <h2>Проекты анализа</h2>
                 <p>Проект объединяет датасеты, версии сценариев, результаты и отчеты. Это помогает не терять контекст между повторными расчетами.</p>
               </div>
@@ -1196,13 +1604,13 @@ export function App() {
                       const latestSummary = parseHistorySummary(latest);
                       return (
                         <article className="project-card" key={project.id}>
-                          <span className="tag">{project.status}</span>
+                          <span className="tag">{translateStatus(project.status)}</span>
                           <h3>{project.name}</h3>
                           <p>{project.description || "Рабочее пространство сравнительного анализа"}</p>
                           <div className="project-stats">
                             <div><span>Сценариев</span><strong>{projectHistory.length}</strong></div>
                             <div><span>Последняя версия</span><strong>{latest ? `v${latest.version_number}` : "-"}</strong></div>
-                            <div><span>Лучший score</span><strong>{latest ? String(latestSummary.analysis_summary?.best_score ?? "-") : "-"}</strong></div>
+                            <div><span>Лучшая оценка</span><strong>{latest ? String(latestSummary.analysis_summary?.best_score ?? "-") : "-"}</strong></div>
                           </div>
                           <div className="project-actions">
                             <button
@@ -1292,7 +1700,7 @@ export function App() {
                       );
                     })}
                     <div className="compare-delta">
-                      <span>Δ best_score</span>
+                      <span>Δ лучшей оценки</span>
                       <strong>
                         {(summaryNumber(parseHistorySummary(comparedHistory[1]), "best_score") -
                           summaryNumber(parseHistorySummary(comparedHistory[0]), "best_score")).toFixed(4)}
@@ -1307,17 +1715,17 @@ export function App() {
                     return (
                       <article className="history-card" key={item.id}>
                         <div>
-                          <span className="tag">{item.status}</span>
+                          <span className="tag">{translateStatus(item.status)}</span>
                           <h3>{item.title}</h3>
                           <p>
                             {new Date(item.created_at).toLocaleString("ru-RU")} · {item.source_filename}
                             {" "}· v{item.version_number}
-                            {item.project_id ? ` · project #${item.project_id}` : ""}
+                            {item.project_id ? ` · проект №${item.project_id}` : ""}
                           </p>
                         </div>
                         <div className="metric mini">
                           <span>Файлы</span>
-                          <strong>{item.dataset_file_id && item.result_file_id ? "S3/local" : "только БД"}</strong>
+                          <strong>{item.dataset_file_id && item.result_file_id ? "файловое хранилище" : "только БД"}</strong>
                         </div>
                         <div className="metric mini">
                           <span>Лучший объект</span>
@@ -1332,6 +1740,9 @@ export function App() {
                           onClick={() => toggleHistoryCompare(item.id)}
                         >
                           {historyCompareIds.includes(item.id) ? "Выбрано" : "Сравнить"}
+                        </button>
+                        <button className="ghost-button compact" onClick={() => applyHistoryScenario(item)}>
+                          Повторить
                         </button>
                       </article>
                     );
@@ -1363,17 +1774,17 @@ export function App() {
                   <div className="metric"><span>Пользователей</span><strong>{adminStats?.users_total ?? "-"}</strong></div>
                   <div className="metric"><span>Администраторов</span><strong>{adminStats?.admins_total ?? "-"}</strong></div>
                   <div className="metric"><span>Активных</span><strong>{adminStats?.active_users_total ?? "-"}</strong></div>
-                  <div className="metric"><span>Projects</span><strong>{systemDashboard?.storage?.projects_total ?? "-"}</strong></div>
-                  <div className="metric"><span>Comparisons</span><strong>{systemDashboard?.storage?.comparisons_total ?? "-"}</strong></div>
-                  <div className="metric"><span>Files</span><strong>{systemDashboard?.storage?.files_total ?? "-"}</strong></div>
+                  <div className="metric"><span>Проектов</span><strong>{systemDashboard?.storage?.projects_total ?? "-"}</strong></div>
+                  <div className="metric"><span>Сравнений</span><strong>{systemDashboard?.storage?.comparisons_total ?? "-"}</strong></div>
+                  <div className="metric"><span>Файлов</span><strong>{systemDashboard?.storage?.files_total ?? "-"}</strong></div>
                 </div>
                 {systemDashboard ? (
                   <div className="service-grid">
                     {Object.entries(systemDashboard.services).map(([name, service]) => (
                       <div className="service-card" key={name}>
                         <span className={service.status === "ok" ? "health-dot ok" : "health-dot"} />
-                        <strong>{name}</strong>
-                        <small>{service.status}{service.status_code ? ` · ${service.status_code}` : ""}</small>
+                        <strong>{SERVICE_LABELS[name] ?? name}</strong>
+                        <small>{translateStatus(service.status)}{service.status_code ? ` · ${service.status_code}` : ""}</small>
                       </div>
                     ))}
                   </div>
@@ -1390,7 +1801,7 @@ export function App() {
                           <td>{item.email}</td>
                           <td>{item.full_name}</td>
                           <td><span className="tag">{item.role}</span></td>
-                          <td>{item.is_active ? "active" : "blocked"}</td>
+                          <td>{item.is_active ? "активен" : "заблокирован"}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -1403,10 +1814,37 @@ export function App() {
           </section>
         ) : null}
 
+        {reportPreviewOpen && result ? (
+          <div className="modal-backdrop report-backdrop" role="presentation" onMouseDown={() => setReportPreviewOpen(false)}>
+            <section className="report-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+              <div className="report-modal-head">
+                <div>
+                  <span className="section-kicker">Предпросмотр</span>
+                  <h2>Предпросмотр отчета</h2>
+                  <p>Проверьте состав отчета перед скачиванием: сводка, критерии, рейтинг и объяснение результата.</p>
+                </div>
+                <button className="modal-close" onClick={() => setReportPreviewOpen(false)} aria-label="Закрыть">×</button>
+              </div>
+              <div className="report-preview-toolbar">
+                <button className="ghost-button" onClick={exportJsonReport}>Скачать JSON</button>
+                <button className="ghost-button" onClick={exportHtmlReport}>Скачать HTML</button>
+                <button onClick={exportDocxReport} disabled={loading}>Скачать DOCX</button>
+              </div>
+              <iframe className="report-preview-frame" title="Предпросмотр отчета" srcDoc={reportHtml} />
+            </section>
+          </div>
+        ) : null}
+
         {authModalOpen ? (
-          <div className="modal-backdrop" role="presentation" onMouseDown={() => setAuthModalOpen(false)}>
+          <div className="modal-backdrop" role="presentation" onMouseDown={() => {
+            setAuthError(null);
+            setAuthModalOpen(false);
+          }}>
             <section className="auth-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
-              <button className="modal-close" onClick={() => setAuthModalOpen(false)} aria-label="Закрыть">×</button>
+              <button className="modal-close" onClick={() => {
+                setAuthError(null);
+                setAuthModalOpen(false);
+              }} aria-label="Закрыть">×</button>
               <span className="section-kicker">{authMode === "login" ? "Вход в систему" : "Новый аккаунт"}</span>
               <h2>{authMode === "login" ? "Добро пожаловать" : "Регистрация"}</h2>
               <p>
@@ -1415,22 +1853,32 @@ export function App() {
                   : "Создайте аккаунт, чтобы сохранять параметры расчетов и возвращаться к результатам позже."}
               </p>
               <div className="auth-form">
+                {authError ? <div className="auth-error" role="alert">{authError}</div> : null}
                 {authMode === "register" ? (
                   <label>
                     Имя
-                    <input value={authName} onChange={(event) => setAuthName(event.target.value)} placeholder="Иван Иванов" />
+                    <input value={authName} onChange={(event) => {
+                      setAuthName(event.target.value);
+                      setAuthError(null);
+                    }} placeholder="Иван Иванов" />
                   </label>
                 ) : null}
                 <label>
                   Email
-                  <input value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} placeholder="name@example.com" />
+                  <input value={authEmail} onChange={(event) => {
+                    setAuthEmail(event.target.value);
+                    setAuthError(null);
+                  }} placeholder="name@example.com" />
                 </label>
                 <label>
                   Пароль
                   <input
                     type="password"
                     value={authPassword}
-                    onChange={(event) => setAuthPassword(event.target.value)}
+                    onChange={(event) => {
+                      setAuthPassword(event.target.value);
+                      setAuthError(null);
+                    }}
                     placeholder="Минимум 6 символов"
                     onKeyDown={(event) => {
                       if (event.key === "Enter") {
@@ -1447,7 +1895,10 @@ export function App() {
                 <span>{authMode === "login" ? "Еще нет аккаунта?" : "Уже зарегистрированы?"}</span>
                 <button
                   className="link-button"
-                  onClick={() => setAuthMode(authMode === "login" ? "register" : "login")}
+                  onClick={() => {
+                    setAuthError(null);
+                    setAuthMode(authMode === "login" ? "register" : "login");
+                  }}
                 >
                   {authMode === "login" ? "Зарегистрироваться" : "Войти"}
                 </button>

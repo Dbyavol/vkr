@@ -87,6 +87,7 @@ export type DatasetProfileResponse = {
 };
 
 export type PipelineProfileResponse = {
+  dataset_file_id?: number;
   preview: PreviewResponse;
   profile: DatasetProfileResponse;
 };

@@ -76,6 +76,18 @@ class PipelineRequest(BaseModel):
     config: PipelineConfig
 
 
+class PipelineStoredRunRequest(BaseModel):
+    filename: str | None = None
+    dataset_file_id: int
+    config: PipelineConfig
+
+
+class PipelineProfileStoredResponse(BaseModel):
+    dataset_file_id: int
+    preview: ImportedPreview
+    profile: dict[str, Any]
+
+
 class Contribution(BaseModel):
     key: str
     name: str

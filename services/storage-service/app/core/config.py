@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     debug: bool = True
     api_prefix: str = "/api/v1"
 
-    database_url: str = "sqlite:///./storage.db"
+    database_url: str = "postgresql+psycopg://postgres:postgres@storage-db:5432/storage"
 
     s3_endpoint_url: str | None = None
     s3_region: str = "us-east-1"

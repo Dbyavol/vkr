@@ -34,6 +34,14 @@ Run Docker smoke checks:
 
 The smoke script builds and starts the stack, waits for service health endpoints, logs in as the demo admin and checks the orchestrator dashboard.
 
+Both `start-docker.ps1` and `test-docker.ps1` first run:
+
+```powershell
+docker compose down --remove-orphans
+```
+
+This guarantees that old containers from a previous run do not affect the next launch.
+
 ## URLs
 
 - Frontend: [http://localhost:5173](http://localhost:5173)
@@ -51,6 +59,22 @@ Demo admin:
 admin@example.com / admin12345
 ```
 
+## Docker Troubleshooting
+
+If you see an error like:
+
+```text
+open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified
+```
+
+Docker CLI is installed, but Docker Desktop Linux Engine is not running. Open Docker Desktop, wait until the engine is fully started, then run:
+
+```powershell
+.\scripts\start-docker.ps1
+```
+
+If Docker Desktop is already open, restart Docker Desktop from the tray menu and try again.
+
 ## Docker Services
 
 - `frontend`: React/Vite user interface.
@@ -63,12 +87,6 @@ admin@example.com / admin12345
 - `auth-db`: PostgreSQL database for authorization.
 - `storage-db`: PostgreSQL database for storage metadata.
 - `minio`: S3-compatible object storage for uploaded datasets and result artifacts.
-
-## Local Scripts
-
-The previous non-Docker local scripts are kept only as a fallback for development/debugging. The expected full-system workflow is Docker Compose.
-
-Before starting Docker, `start-docker.ps1` also calls `stop-local.ps1` to close old local processes on the project ports.
 
 ## Project Files
 

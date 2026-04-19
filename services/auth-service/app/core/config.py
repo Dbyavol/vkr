@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     app_name: str = "Auth Service"
     debug: bool = True
-    database_url: str = "sqlite:///./auth.db"
+    database_url: str = "postgresql+psycopg://postgres:postgres@auth-db:5432/auth"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     jwt_secret: str = "change-me-in-production"
     jwt_expires_seconds: int = 86400

@@ -27,17 +27,25 @@ def _to_float(value: Any) -> float | None:
         return 1.0 if value else 0.0
     if isinstance(value, (int, float)):
         return float(value)
+    if isinstance(value, str):
+        normalized = value.strip().replace(" ", "").replace(",", ".")
+        if not normalized:
+            return None
+        try:
+            return float(normalized)
+        except ValueError:
+            return None
     return None
 
 
 def _normalize_numeric(raw_value: Any, criterion: CriterionConfig, values: list[float]) -> NormalizedCriterionValue:
     numeric = _to_float(raw_value)
     if numeric is None:
-        return NormalizedCriterionValue(0.0, "Missing or non-numeric value")
+        return NormalizedCriterionValue(0.0, "Значение отсутствует или не является числом")
     min_value = min(values)
     max_value = max(values)
     if min_value == max_value:
-        return NormalizedCriterionValue(1.0, "All objects share the same value for this criterion")
+        return NormalizedCriterionValue(1.0, "У всех объектов одинаковое значение по этому критерию")
     if criterion.direction == "minimize":
         return NormalizedCriterionValue((max_value - numeric) / (max_value - min_value))
     return NormalizedCriterionValue((numeric - min_value) / (max_value - min_value))
@@ -50,14 +58,14 @@ def _normalize_categorical(raw_value: Any, criterion: CriterionConfig) -> Normal
         return NormalizedCriterionValue(criterion.scale_map.get(str(raw_value), 0.0))
     if isinstance(raw_value, bool):
         return NormalizedCriterionValue(1.0 if raw_value else 0.0)
-    return NormalizedCriterionValue(0.0, "No scale_map provided for categorical criterion")
+    return NormalizedCriterionValue(0.0, "Для категориального критерия не задана шкала")
 
 
 def _normalize_value(raw_value: Any, criterion: CriterionConfig, dataset_values: list[Any]) -> NormalizedCriterionValue:
     if criterion.type == "numeric":
         numeric_values = [value for item in dataset_values if (value := _to_float(item)) is not None]
         if not numeric_values:
-            return NormalizedCriterionValue(0.0, "No numeric values available in dataset")
+            return NormalizedCriterionValue(0.0, "В датасете нет числовых значений по этому критерию")
         return _normalize_numeric(raw_value, criterion, numeric_values)
     return _normalize_categorical(raw_value, criterion)
 
@@ -70,7 +78,7 @@ def _weights(criteria: list[CriterionConfig], auto_normalize: bool) -> tuple[dic
     if abs(raw_sum - 1.0) > 1e-9:
         if not auto_normalize:
             raise ValueError("The sum of weights must be 1.0 when auto_normalize_weights=false")
-        notes.append(f"Weights were normalized automatically from {raw_sum:.4f} to 1.0000")
+        notes.append(f"Веса были автоматически нормализованы: {raw_sum:.4f} -> 1.0000")
     return {item.key: item.weight / raw_sum for item in criteria}, notes
 
 
@@ -118,13 +126,13 @@ def _criterion_sensitivity(rows: list[RankedObject], criteria: list[CriterionCon
         weight = next((item.weight for row in rows for item in row.contributions if item.key == key), 0.0)
         sensitivity_index = round(normalized_range * weight, 4)
         if normalized_range == 0:
-            note = "Criterion has no spread and does not change ranking."
+            note = "Критерий не имеет разброса и не влияет на ранжирование."
         elif sensitivity_index >= 0.2:
-            note = "Ranking is highly sensitive to this criterion."
+            note = "Рейтинг сильно чувствителен к этому критерию."
         elif sensitivity_index >= 0.08:
-            note = "Criterion has a moderate influence on ranking."
+            note = "Критерий умеренно влияет на ранжирование."
         else:
-            note = "Criterion has a low influence with current weights."
+            note = "При текущих весах критерий влияет слабо."
         result.append(
             CriterionSensitivity(
                 key=key,
@@ -140,20 +148,20 @@ def _criterion_sensitivity(rows: list[RankedObject], criteria: list[CriterionCon
 
 def _ranking_stability_note(rows: list[RankedObject]) -> str:
     if len(rows) < 2:
-        return "Only one comparable object is available, stability cannot be estimated."
+        return "Доступен только один объект сравнения, устойчивость рейтинга оценить нельзя."
     margin = rows[0].score - rows[1].score
     if margin >= 0.15:
-        return f"Ranking is stable: the leader is ahead of the second object by {margin:.4f}."
+        return f"Рейтинг устойчив: лидер опережает второй объект на {margin:.4f}."
     if margin >= 0.05:
-        return f"Ranking is moderately stable: the leader margin is {margin:.4f}."
-    return f"Ranking is sensitive: the leader margin is only {margin:.4f}."
+        return f"Рейтинг умеренно устойчив: отрыв лидера составляет {margin:.4f}."
+    return f"Рейтинг чувствителен: отрыв лидера составляет только {margin:.4f}."
 
 
 def _analog_groups(rows: list[RankedObject]) -> list[AnalogGroup]:
     groups = [
-        ("Very close analogs", 0.85, 1.0),
-        ("Moderately close analogs", 0.65, 0.8499),
-        ("Weak analogs", 0.0, 0.6499),
+        ("Очень близкие аналоги", 0.85, 1.0),
+        ("Умеренно близкие аналоги", 0.65, 0.8499),
+        ("Слабые аналоги", 0.0, 0.6499),
     ]
     result: list[AnalogGroup] = []
     for label, low, high in groups:
@@ -200,7 +208,13 @@ def _confidence(rows: list[RankedObject], criteria_count: int) -> tuple[float, l
         1
         for row in rows
         for contribution in row.contributions
-        if contribution.note and ("Missing" in contribution.note or "No " in contribution.note)
+        if contribution.note
+        and (
+            "отсутствует" in contribution.note
+            or "не является числом" in contribution.note
+            or "нет числовых" in contribution.note
+            or "не задана шкала" in contribution.note
+        )
     )
     total_cells = max(len(rows) * criteria_count, 1)
     missing_ratio = missing_notes / total_cells
@@ -209,18 +223,18 @@ def _confidence(rows: list[RankedObject], criteria_count: int) -> tuple[float, l
         contribution.key
         for row in rows
         for contribution in row.contributions
-        if contribution.note and "same value" in contribution.note
+        if contribution.note and "одинаковое значение" in contribution.note
     }
     if missing_ratio:
-        notes.append(f"{missing_ratio:.1%} criterion values are missing or unavailable.")
+        notes.append(f"{missing_ratio:.1%} значений критериев отсутствуют или недоступны для расчета.")
     if flat_criteria:
         confidence -= min(0.25, 0.05 * len(flat_criteria))
-        notes.append(f"{len(flat_criteria)} criteria have identical values and do not influence ranking.")
+        notes.append(f"{len(flat_criteria)} критериев имеют одинаковые значения и не влияют на ранжирование.")
     if criteria_count < 3:
         confidence -= 0.1
-        notes.append("Few active criteria are used, result should be interpreted carefully.")
+        notes.append("Используется мало активных критериев, результат следует интерпретировать осторожно.")
     if not notes:
-        notes.append("Dataset is sufficiently complete for the selected criteria.")
+        notes.append("Датасет достаточно полный для выбранных критериев.")
     return round(max(0.0, min(1.0, confidence)), 4), notes
 
 
@@ -261,8 +275,8 @@ def run_comparative_analysis(payload: AnalysisRequest) -> AnalysisResponse:
         top_positive = sorted(contributions, key=lambda item: item.contribution, reverse=True)[:3]
         top_negative = sorted(contributions, key=lambda item: item.contribution)[:2]
         explanation = (
-            f"Strongest factors: {', '.join(item.name for item in top_positive) or 'n/a'}. "
-            f"Weakest factors: {', '.join(item.name for item in top_negative) or 'n/a'}."
+            f"Сильнее всего оценку повысили: {', '.join(item.name for item in top_positive) or 'нет данных'}. "
+            f"Слабее всего повлияли: {', '.join(item.name for item in top_negative) or 'нет данных'}."
         )
         rows.append(
             RankedObject(
@@ -281,8 +295,8 @@ def run_comparative_analysis(payload: AnalysisRequest) -> AnalysisResponse:
         if payload.mode == "analog_search" and row.similarity_to_target is not None:
             row.score = row.similarity_to_target
             row.explanation = (
-                f"Analog similarity to target object: {row.similarity_to_target:.4f}. "
-                f"Closest criteria are ranked by weighted normalized distance."
+                f"Сходство с целевым объектом: {row.similarity_to_target:.4f}. "
+                f"Расчет выполнен по взвешенной близости нормализованных критериев."
             )
 
     if payload.mode == "analog_search" and payload.target_object_id:

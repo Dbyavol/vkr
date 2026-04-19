@@ -3,9 +3,7 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
-if (Test-Path (Join-Path $PSScriptRoot "stop-local.ps1")) {
-    & (Join-Path $PSScriptRoot "stop-local.ps1") | Out-Null
-}
+docker compose down --remove-orphans
 
 docker compose up --build -d
 

@@ -87,3 +87,32 @@ def test_analysis_can_search_analogs_for_target_object() -> None:
     assert result.summary.mode == "analog_search"
     assert result.ranking[0].object_id == "close"
     assert all(item.object_id != "target" for item in result.ranking)
+
+
+def test_analysis_parses_numeric_strings_from_imported_csv() -> None:
+    payload = AnalysisRequest.model_validate(
+        {
+            "dataset": {
+                "objects": [
+                    {"id": "a", "title": "A", "attributes": {"price": "120000", "rating": "4,7"}},
+                    {"id": "b", "title": "B", "attributes": {"price": "98000", "rating": "4.2"}},
+                    {"id": "c", "title": "C", "attributes": {"price": "", "rating": "bad-value"}},
+                ]
+            },
+            "criteria": [
+                {"key": "price", "name": "Price", "weight": 0.5, "type": "numeric", "direction": "minimize"},
+                {"key": "rating", "name": "Rating", "weight": 0.5, "type": "numeric", "direction": "maximize"},
+            ],
+        }
+    )
+
+    result = run_comparative_analysis(payload)
+
+    assert result.ranking[0].object_id in {"a", "b"}
+    assert result.ranking[0].score > result.ranking[-1].score
+    assert "В датасете нет числовых значений по этому критерию" not in {
+        contribution.note
+        for row in result.ranking
+        for contribution in row.contributions
+        if contribution.note
+    }

@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -62,6 +63,20 @@ def read_file(file_id: int, db: Session = Depends(get_db)) -> FileRead:
     if item is None:
         raise HTTPException(status_code=404, detail="File not found")
     return item
+
+
+@router.get("/files/{file_id}/content")
+def download_file_content(file_id: int, db: Session = Depends(get_db)) -> Response:
+    item = get_file(db, file_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    adapter = StorageAdapter()
+    body = adapter.download(item.storage_key)
+    return Response(
+        content=body,
+        media_type=item.content_type or "application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{item.original_name}"'},
+    )
 
 
 @router.get("/files/{file_id}/download-url")

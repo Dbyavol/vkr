@@ -12,7 +12,10 @@ router = APIRouter(prefix="/api/v1", tags=["auth"])
 
 def current_user(authorization: str | None = Header(default=None), db: Session = Depends(get_db)) -> User:
     if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Missing bearer token")
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "AUTH_REQUIRED", "message": "Необходимо войти в систему"},
+        )
     token = authorization.split(" ", 1)[1]
     try:
         payload = decode_access_token(token)
@@ -20,20 +23,29 @@ def current_user(authorization: str | None = Header(default=None), db: Session =
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     user = get_user(db, int(payload["sub"]))
     if user is None or not user.is_active:
-        raise HTTPException(status_code=401, detail="User not found or inactive")
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "USER_INACTIVE", "message": "Пользователь не найден или отключен"},
+        )
     return user
 
 
 def require_admin(user: User = Depends(current_user)) -> User:
     if user.role != "admin":
-        raise HTTPException(status_code=403, detail="Admin role required")
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "ADMIN_REQUIRED", "message": "Для действия нужны права администратора"},
+        )
     return user
 
 
 @router.post("/auth/register", response_model=TokenResponse, status_code=201)
 def register(payload: UserCreate, db: Session = Depends(get_db)) -> TokenResponse:
     if get_user_by_email(db, payload.email):
-        raise HTTPException(status_code=409, detail="User already exists")
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "USER_EXISTS", "message": "Пользователь с таким email уже зарегистрирован"},
+        )
     user = create_user(db, payload)
     token = create_access_token(str(user.id), {"email": user.email, "role": user.role})
     return TokenResponse(access_token=token, user=UserRead.model_validate(user))
@@ -43,7 +55,10 @@ def register(payload: UserCreate, db: Session = Depends(get_db)) -> TokenRespons
 def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse:
     user = get_user_by_email(db, payload.email)
     if user is None or not verify_password(payload.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid email or password")
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "INVALID_CREDENTIALS", "message": "Неверный email или пароль"},
+        )
     mark_login(db, user)
     token = create_access_token(str(user.id), {"email": user.email, "role": user.role})
     return TokenResponse(access_token=token, user=UserRead.model_validate(user))

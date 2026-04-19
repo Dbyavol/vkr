@@ -10,12 +10,26 @@ from app.core_config import Settings
 from app.schemas.pipeline import PipelineRequest, PipelineRunResponse
 
 
+PREVIEW_NORMALIZED_ROW_LIMIT = 200
+
+
+def _object_title(row: dict[str, Any]) -> str:
+    if row.get("title") not in (None, ""):
+        return str(row["title"])
+    values = row.get("values", {})
+    for key in ("name", "title", "object_name", "label", "название", "наименование"):
+        value = values.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return f"Объект {row['id']}"
+
+
 def _analysis_dataset(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "objects": [
             {
                 "id": row["id"],
-                "title": f"Object {row['id']}",
+                "title": _object_title(row),
                 "attributes": row["values"],
             }
             for row in rows
@@ -37,6 +51,51 @@ async def fetch_preview(
         response = await client.post(f"{settings.import_service_url}/api/v1/imports/parse-base64", json=payload)
         response.raise_for_status()
         return response.json()
+
+
+def lightweight_preview(preview: dict[str, Any], limit: int = PREVIEW_NORMALIZED_ROW_LIMIT) -> dict[str, Any]:
+    trimmed = dict(preview)
+    normalized_dataset = preview.get("normalized_dataset") or {}
+    rows = list(normalized_dataset.get("rows") or [])
+    trimmed["normalized_dataset"] = {"rows": rows[:limit]}
+    trimmed["preview_rows"] = list(preview.get("preview_rows") or [])[: min(limit, 50)]
+    if len(rows) > limit:
+        warnings = list(trimmed.get("warnings") or [])
+        warnings.append(
+            f"Для ускорения интерфейса показаны первые {limit} строк. Полный датасет сохранен в хранилище и используется при расчете."
+        )
+        trimmed["warnings"] = warnings
+    return trimmed
+
+
+async def upload_dataset_file(
+    *,
+    settings: Settings,
+    filename: str,
+    body: bytes,
+) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=settings.request_timeout_seconds, trust_env=False) as client:
+        response = await client.post(
+            f"{settings.storage_service_url}/api/v1/files/upload",
+            params={"purpose": "comparison-dataset-source"},
+            files={"file": (filename, body, "application/octet-stream")},
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+async def fetch_stored_file_metadata(*, settings: Settings, file_id: int) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=settings.request_timeout_seconds, trust_env=False) as client:
+        response = await client.get(f"{settings.storage_service_url}/api/v1/files/{file_id}")
+        response.raise_for_status()
+        return response.json()
+
+
+async def fetch_stored_file_body(*, settings: Settings, file_id: int) -> bytes:
+    async with httpx.AsyncClient(timeout=settings.request_timeout_seconds, trust_env=False) as client:
+        response = await client.get(f"{settings.storage_service_url}/api/v1/files/{file_id}/content")
+        response.raise_for_status()
+        return response.content
 
 
 async def preprocess_dataset(
@@ -91,7 +150,18 @@ async def fetch_dataset_profile(
 ) -> dict[str, Any]:
     preview = await fetch_preview(settings=settings, filename=filename, body=body)
     profile = await profile_imported_dataset(settings=settings, rows=preview["normalized_dataset"]["rows"])
-    return {"preview": preview, "profile": profile}
+    return {"preview": lightweight_preview(preview), "profile": profile}
+
+
+async def upload_and_profile_dataset(
+    *,
+    settings: Settings,
+    filename: str,
+    body: bytes,
+) -> dict[str, Any]:
+    uploaded = await upload_dataset_file(settings=settings, filename=filename, body=body)
+    profiled = await fetch_dataset_profile(settings=settings, filename=filename, body=body)
+    return {"dataset_file_id": uploaded["id"], **profiled}
 
 
 async def analyze_dataset(
@@ -138,19 +208,25 @@ async def save_comparison_history(
     settings: Settings,
     user: dict[str, Any] | None,
     filename: str,
-    source_body: bytes,
+    source_body: bytes | None,
     parameters: dict[str, Any],
     result: dict[str, Any],
+    dataset_file_id: int | None = None,
 ) -> dict[str, Any] | None:
     if user is None:
         return None
     async with httpx.AsyncClient(timeout=settings.request_timeout_seconds, trust_env=False) as client:
-        dataset_upload = await client.post(
-            f"{settings.storage_service_url}/api/v1/files/upload",
-            params={"purpose": "comparison-dataset"},
-            files={"file": (filename, source_body, "application/octet-stream")},
-        )
-        dataset_upload.raise_for_status()
+        dataset_file = {"id": dataset_file_id}
+        if dataset_file_id is None:
+            if source_body is None:
+                raise ValueError("Source body is required when dataset_file_id is not provided")
+            dataset_upload = await client.post(
+                f"{settings.storage_service_url}/api/v1/files/upload",
+                params={"purpose": "comparison-dataset"},
+                files={"file": (filename, source_body, "application/octet-stream")},
+            )
+            dataset_upload.raise_for_status()
+            dataset_file = dataset_upload.json()
         result_upload = await client.post(
             f"{settings.storage_service_url}/api/v1/files/upload",
             params={"purpose": "comparison-result"},
@@ -163,12 +239,11 @@ async def save_comparison_history(
             },
         )
         result_upload.raise_for_status()
-        dataset_file = dataset_upload.json()
         result_file = result_upload.json()
     payload = {
         "user_id": user["id"],
         "user_email": user["email"],
-        "title": f"Comparison: {filename}",
+        "title": f"Сравнение: {filename}",
         "project_id": parameters.get("project_id"),
         "parent_history_id": parameters.get("parent_history_id"),
         "source_filename": filename,
@@ -265,9 +340,14 @@ async def run_pipeline_via_services(
     body: bytes,
     payload: PipelineRequest,
     authorization: str | None = None,
+    dataset_file_id: int | None = None,
 ) -> PipelineRunResponse:
     user = await fetch_current_user(settings, authorization)
     preview = await fetch_preview(settings=settings, filename=filename, body=body)
+    title_by_id = {
+        row["id"]: _object_title(row)
+        for row in preview["normalized_dataset"]["rows"]
+    }
     preprocessing = await preprocess_dataset(
         settings=settings,
         rows=preview["normalized_dataset"]["rows"],
@@ -276,6 +356,7 @@ async def run_pipeline_via_services(
     processed_rows = [
         {
             "id": row["id"],
+            "title": title_by_id.get(row["id"], f"Объект {row['id']}"),
             "values": row["values"],
         }
         for row in preprocessing["dataset"]
@@ -292,7 +373,7 @@ async def run_pipeline_via_services(
         top_n=payload.config.top_n,
     )
     response_payload = PipelineRunResponse(
-        import_preview=preview,
+        import_preview=lightweight_preview(preview),
         preprocessing_summary=preprocessing["summary"],
         analysis_summary=analysis["summary"],
         ranking=analysis["ranking"],
@@ -304,5 +385,27 @@ async def run_pipeline_via_services(
         source_body=body,
         parameters=payload.config.model_dump(),
         result=response_payload.model_dump(),
+        dataset_file_id=dataset_file_id,
     )
     return response_payload
+
+
+async def run_pipeline_from_storage(
+    *,
+    settings: Settings,
+    dataset_file_id: int,
+    filename: str | None,
+    payload: PipelineRequest,
+    authorization: str | None = None,
+) -> PipelineRunResponse:
+    metadata = await fetch_stored_file_metadata(settings=settings, file_id=dataset_file_id)
+    body = await fetch_stored_file_body(settings=settings, file_id=dataset_file_id)
+    resolved_filename = filename or metadata.get("original_name") or payload.filename or "dataset"
+    return await run_pipeline_via_services(
+        settings=settings,
+        filename=resolved_filename,
+        body=body,
+        payload=payload,
+        authorization=authorization,
+        dataset_file_id=dataset_file_id,
+    )

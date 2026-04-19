@@ -7,12 +7,22 @@ from fastapi.responses import StreamingResponse
 from docx import Document
 
 from app.core_config import get_settings
-from app.schemas.pipeline import ImportedPreview, PipelineConfig, PipelineRequest, PipelineRunResponse, ReportRequest
+from app.schemas.pipeline import (
+    ImportedPreview,
+    PipelineConfig,
+    PipelineProfileStoredResponse,
+    PipelineRequest,
+    PipelineRunResponse,
+    PipelineStoredRunRequest,
+    ReportRequest,
+)
 from app.services.pipeline_engine import (
     fetch_dataset_profile,
     fetch_preview,
     fetch_system_dashboard,
+    run_pipeline_from_storage,
     run_pipeline_via_services,
+    upload_and_profile_dataset,
 )
 
 settings = get_settings()
@@ -36,6 +46,57 @@ app.add_middleware(
 @app.get("/health")
 def healthcheck() -> dict[str, str]:
     return {"status": "ok"}
+
+
+SUMMARY_LABELS = {
+    "objects_count": "Количество объектов",
+    "criteria_count": "Количество критериев",
+    "weights_sum": "Сумма весов",
+    "best_object_id": "Лучший объект",
+    "best_score": "Лучшая оценка",
+    "normalization_notes": "Нормализация",
+    "mode": "Режим анализа",
+    "target_object_id": "Целевой объект",
+    "confidence_score": "Доверие к расчету",
+    "confidence_notes": "Замечания к качеству",
+    "sensitivity": "Чувствительность",
+    "ranking_stability_note": "Устойчивость рейтинга",
+    "analog_groups": "Группы аналогов",
+    "dominance_pairs": "Доминирование объектов",
+}
+
+DIRECTION_LABELS = {
+    "maximize": "максимизация",
+    "minimize": "минимизация",
+    "target": "близость к целевому значению",
+}
+
+MODE_LABELS = {
+    "rating": "рейтинг объектов",
+    "analog_search": "поиск аналогов",
+}
+
+
+def report_label(key: str) -> str:
+    return SUMMARY_LABELS.get(key, key.replace("_", " "))
+
+
+def report_value(key: str, value: object) -> str:
+    if value is None:
+        return "-"
+    if key == "mode":
+        return MODE_LABELS.get(str(value), str(value))
+    if isinstance(value, list):
+        if not value:
+            return "нет данных"
+        if all(isinstance(item, str) for item in value):
+            return "; ".join(str(item) for item in value)
+        return f"{len(value)} записей"
+    if isinstance(value, float):
+        return f"{value:.4f}"
+    if isinstance(value, dict):
+        return "см. детальный раздел"
+    return str(value)
 
 
 @app.get("/api/v1/system/dashboard")
@@ -68,6 +129,19 @@ async def pipeline_profile(file: UploadFile = File(...)) -> dict:
         ) from exc
 
 
+@app.post("/api/v1/pipeline/upload-profile", response_model=PipelineProfileStoredResponse)
+async def pipeline_upload_profile(file: UploadFile = File(...)) -> PipelineProfileStoredResponse:
+    try:
+        body = await file.read()
+        data = await upload_and_profile_dataset(settings=settings, filename=file.filename or "dataset", body=body)
+        return PipelineProfileStoredResponse.model_validate(data)
+    except (ValueError, httpx.HTTPError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "PIPELINE_PROFILE_ERROR", "message": str(exc)},
+        ) from exc
+
+
 @app.post("/api/v1/pipeline/run", response_model=PipelineRunResponse)
 async def pipeline_run(
     file: UploadFile = File(...),
@@ -92,6 +166,27 @@ async def pipeline_run(
         ) from exc
 
 
+@app.post("/api/v1/pipeline/run-stored", response_model=PipelineRunResponse)
+async def pipeline_run_stored(
+    payload: PipelineStoredRunRequest,
+    authorization: str | None = Header(default=None),
+) -> PipelineRunResponse:
+    try:
+        request = PipelineRequest(filename=payload.filename or "dataset", config=payload.config)
+        return await run_pipeline_from_storage(
+            settings=settings,
+            dataset_file_id=payload.dataset_file_id,
+            filename=payload.filename,
+            payload=request,
+            authorization=authorization,
+        )
+    except (ValueError, httpx.HTTPError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "PIPELINE_VALIDATION_ERROR", "message": str(exc)},
+        ) from exc
+
+
 @app.post("/api/v1/reports/comparison.docx")
 def comparison_report(payload: ReportRequest) -> StreamingResponse:
     document = Document()
@@ -104,8 +199,8 @@ def comparison_report(payload: ReportRequest) -> StreamingResponse:
     summary_table.rows[0].cells[1].text = "Значение"
     for key, value in payload.result.analysis_summary.items():
         row = summary_table.add_row().cells
-        row[0].text = str(key)
-        row[1].text = str(value)
+        row[0].text = report_label(str(key))
+        row[1].text = report_value(str(key), value)
 
     document.add_heading("Критерии", level=1)
     criteria_table = document.add_table(rows=1, cols=4)
@@ -117,7 +212,7 @@ def comparison_report(payload: ReportRequest) -> StreamingResponse:
         row[0].text = criterion.name
         row[1].text = criterion.key
         row[2].text = f"{criterion.weight:.4f}"
-        row[3].text = criterion.direction
+        row[3].text = DIRECTION_LABELS.get(criterion.direction, criterion.direction)
 
     document.add_heading("Результаты", level=1)
     result_table = document.add_table(rows=1, cols=5)

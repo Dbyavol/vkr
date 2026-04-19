@@ -3,6 +3,9 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
+. (Join-Path $PSScriptRoot "docker-common.ps1")
+Assert-DockerEngine
+
 function Wait-Http {
     param(
         [string]$Url,
@@ -23,6 +26,7 @@ function Wait-Http {
     throw "$Name did not become ready: $Url"
 }
 
+docker compose down --remove-orphans
 docker compose up --build -d
 
 Wait-Http "http://localhost:8040/health" "auth-service"
@@ -31,6 +35,7 @@ Wait-Http "http://localhost:8060/health" "import-service"
 Wait-Http "http://localhost:8070/health" "storage-service"
 Wait-Http "http://localhost:8080/health" "comparative-analysis-service"
 Wait-Http "http://localhost:8090/health" "preprocessing-service"
+Wait-Http "http://localhost:5173" "frontend"
 
 $login = Invoke-RestMethod `
     -Uri "http://localhost:8040/api/v1/auth/login" `

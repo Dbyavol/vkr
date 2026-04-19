@@ -23,10 +23,55 @@ const STORAGE_URL =
   ((import.meta as unknown as { env?: { VITE_STORAGE_URL?: string } }).env?.VITE_STORAGE_URL ??
     "http://localhost:8070/api/v1").replace(/\/$/, "");
 
+type ApiValidationError = {
+  loc?: unknown[];
+  msg?: string;
+  type?: string;
+};
+
+function mapKnownError(message: string, fallback: string) {
+  const normalized = message.toLowerCase();
+  if (normalized.includes("user already exists")) {
+    return "Пользователь с таким email уже зарегистрирован.";
+  }
+  if (normalized.includes("invalid email or password")) {
+    return "Неверный email или пароль.";
+  }
+  if (normalized.includes("missing bearer token") || normalized.includes("not authenticated")) {
+    return "Необходимо войти в систему.";
+  }
+  if (normalized.includes("admin role required")) {
+    return "Для действия нужны права администратора.";
+  }
+  return message || fallback;
+}
+
+function formatValidationErrors(errors: ApiValidationError[], fallback: string) {
+  const messages = errors.map((error) => {
+    const field = Array.isArray(error.loc) && error.loc.length > 0 ? String(error.loc[error.loc.length - 1]) : "";
+    if (field === "email") {
+      return "Введите корректный email.";
+    }
+    if (field === "password") {
+      return "Пароль должен содержать минимум 6 символов.";
+    }
+    if (field === "full_name") {
+      return "Имя должно содержать минимум 2 символа.";
+    }
+    return error.msg ? mapKnownError(error.msg, fallback) : fallback;
+  });
+  return Array.from(new Set(messages)).join(" ");
+}
+
 async function readError(response: Response, fallback: string) {
   try {
     const payload = await response.json();
-    return payload?.detail?.message ?? payload?.detail ?? fallback;
+    const detail = payload?.detail;
+    if (Array.isArray(detail)) {
+      return formatValidationErrors(detail, fallback);
+    }
+    const rawMessage = payload?.error?.message ?? detail?.message ?? payload?.message ?? detail;
+    return typeof rawMessage === "string" ? mapKnownError(rawMessage, fallback) : fallback;
   } catch {
     return fallback;
   }
@@ -52,7 +97,7 @@ export async function profileFile(file: File): Promise<PipelineProfileResponse> 
   const form = new FormData();
   form.append("file", file);
 
-  const response = await fetch(`${ORCHESTRATOR_URL}/pipeline/profile`, {
+  const response = await fetch(`${ORCHESTRATOR_URL}/pipeline/upload-profile`, {
     method: "POST",
     body: form,
   });
@@ -65,7 +110,7 @@ export async function profileFile(file: File): Promise<PipelineProfileResponse> 
 }
 
 export async function runPipeline(
-  file: File,
+  file: File | null,
   fields: FieldConfig[],
   criteria: CriterionConfig[],
   targetRowId?: string,
@@ -74,22 +119,48 @@ export async function runPipeline(
   projectId?: number | null,
   scenarioTitle?: string,
   parentHistoryId?: number | null,
+  datasetFileId?: number | null,
+  filename?: string,
 ): Promise<PipelineResult> {
+  const config = {
+    fields,
+    criteria,
+    target_row_id: targetRowId || null,
+    analysis_mode: analysisMode,
+    top_n: 10,
+    project_id: projectId ?? null,
+    scenario_title: scenarioTitle || null,
+    parent_history_id: parentHistoryId ?? null,
+  };
+
+  if (datasetFileId) {
+    const response = await fetch(`${ORCHESTRATOR_URL}/pipeline/run-stored`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({
+        filename: filename || file?.name || "dataset",
+        dataset_file_id: datasetFileId,
+        config,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(await readError(response, "Не удалось выполнить расчет"));
+    }
+
+    return response.json();
+  }
+
+  if (!file) {
+    throw new Error("Сначала загрузите датасет или восстановите сохраненный файл.");
+  }
+
   const form = new FormData();
   form.append("file", file);
-  form.append(
-    "config_json",
-    JSON.stringify({
-      fields,
-      criteria,
-      target_row_id: targetRowId || null,
-      analysis_mode: analysisMode,
-      top_n: 10,
-      project_id: projectId ?? null,
-      scenario_title: scenarioTitle || null,
-      parent_history_id: parentHistoryId ?? null,
-    }),
-  );
+  form.append("config_json", JSON.stringify(config));
 
   const response = await fetch(`${ORCHESTRATOR_URL}/pipeline/run`, {
     method: "POST",

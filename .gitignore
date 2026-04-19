@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+*.db
+*.sqlite3
+local_storage/
+services/storage-service/local_storage/
+frontend/node_modules/
+frontend/dist/
+*.log

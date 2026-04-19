@@ -1,0 +1,13 @@
+name,price,area,rating,category,region,in_stock,warranty_months,delivery_days
+Alpha,120000,45.5,4.7,premium,north,true,24,3
+Beta,98000,39.0,4.2,standard,south,true,12,5
+Gamma,143000,51.2,4.9,premium,west,false,36,2
+Delta,87000,37.8,3.9,budget,east,true,6,7
+Epsilon,111000,42.1,4.4,standard,north,false,18,4
+Zeta,76000,35.4,3.7,budget,south,true,6,8
+Eta,132000,48.0,4.8,premium,east,true,24,3
+Theta,95000,40.2,4.1,standard,west,false,12,6
+Iota,69000,33.5,3.5,budget,north,true,0,10
+Kappa,118000,44.3,4.5,standard,east,true,18,4
+Lambda,210000,60.0,5.0,premium,west,true,48,1
+Mu,83000,,3.8,budget,south,false,6,9

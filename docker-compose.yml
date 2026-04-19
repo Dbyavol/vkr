@@ -1,0 +1,172 @@
+services:
+  auth-db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: auth
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5433:5432"
+    volumes:
+      - auth_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d auth"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  storage-db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: storage
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5434:5432"
+    volumes:
+      - storage_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d storage"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+
+  auth-service:
+    build: ./services/auth-service
+    environment:
+      AUTH_DATABASE_URL: postgresql+psycopg://postgres:postgres@auth-db:5432/auth
+      AUTH_JWT_SECRET: local-dev-secret
+      AUTH_BOOTSTRAP_ADMIN_EMAIL: admin@example.com
+      AUTH_BOOTSTRAP_ADMIN_PASSWORD: admin12345
+      AUTH_CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+    ports:
+      - "8040:8040"
+    depends_on:
+      auth-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8040/health', timeout=3).read()"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  import-service:
+    build: ./services/import-service
+    ports:
+      - "8060:8060"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8060/health', timeout=3).read()"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  preprocessing-service:
+    build: ./services/preprocessing-service
+    ports:
+      - "8090:8090"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=3).read()"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  comparative-analysis-service:
+    build: ./services/comparative-analysis-service
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3).read()"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  storage-service:
+    build: ./services/storage-service
+    environment:
+      STORAGE_DATABASE_URL: postgresql+psycopg://postgres:postgres@storage-db:5432/storage
+      STORAGE_S3_ENDPOINT_URL: http://minio:9000
+      STORAGE_S3_REGION: us-east-1
+      STORAGE_S3_ACCESS_KEY_ID: minioadmin
+      STORAGE_S3_SECRET_ACCESS_KEY: minioadmin
+      STORAGE_S3_BUCKET_NAME: uploads
+      STORAGE_CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+    ports:
+      - "8070:8070"
+    depends_on:
+      storage-db:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8070/health', timeout=3).read()"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  orchestrator-service:
+    build: ./services/orchestrator-service
+    environment:
+      ORCHESTRATOR_AUTH_SERVICE_URL: http://auth-service:8040
+      ORCHESTRATOR_IMPORT_SERVICE_URL: http://import-service:8060
+      ORCHESTRATOR_PREPROCESSING_SERVICE_URL: http://preprocessing-service:8090
+      ORCHESTRATOR_ANALYSIS_SERVICE_URL: http://comparative-analysis-service:8080
+      ORCHESTRATOR_STORAGE_SERVICE_URL: http://storage-service:8070
+      ORCHESTRATOR_CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+    ports:
+      - "8050:8050"
+    depends_on:
+      auth-service:
+        condition: service_healthy
+      import-service:
+        condition: service_healthy
+      preprocessing-service:
+        condition: service_healthy
+      comparative-analysis-service:
+        condition: service_healthy
+      storage-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8050/health', timeout=3).read()"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  frontend:
+    image: node:20-alpine
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 5173"
+    environment:
+      VITE_ORCHESTRATOR_URL: http://localhost:8050/api/v1
+      VITE_AUTH_URL: http://localhost:8040/api/v1
+      VITE_STORAGE_URL: http://localhost:8070/api/v1
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    ports:
+      - "5173:5173"
+    depends_on:
+      orchestrator-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5173').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  auth_db_data:
+  storage_db_data:
+  minio_data:
+  frontend_node_modules:

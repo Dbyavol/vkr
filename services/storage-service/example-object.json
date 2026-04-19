@@ -1,0 +1,36 @@
+{
+  "title": "Объект анализа 1",
+  "external_id": "obj-1",
+  "description": "Универсальный объект для демонстрации storage-service",
+  "source": "manual",
+  "status": "active",
+  "is_active": true,
+  "attributes": [
+    {
+      "key": "price",
+      "label": "Цена",
+      "value_type": "number",
+      "value": 12000000,
+      "unit": "RUB"
+    },
+    {
+      "key": "area",
+      "label": "Площадь",
+      "value_type": "number",
+      "value": 58.4,
+      "unit": "m2"
+    },
+    {
+      "key": "condition",
+      "label": "Состояние",
+      "value_type": "string",
+      "value": "good"
+    },
+    {
+      "key": "parking",
+      "label": "Парковка",
+      "value_type": "boolean",
+      "value": true
+    }
+  ]
+}

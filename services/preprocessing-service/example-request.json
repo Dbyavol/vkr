@@ -1,0 +1,82 @@
+{
+  "dataset": {
+    "rows": [
+      {
+        "id": "obj-1",
+        "values": {
+          "price": 12000000,
+          "area": 58.4,
+          "condition": "good",
+          "district": "center",
+          "parking": true
+        }
+      },
+      {
+        "id": "obj-2",
+        "values": {
+          "price": 11500000,
+          "area": 55.0,
+          "condition": "excellent",
+          "district": "north",
+          "parking": false
+        }
+      },
+      {
+        "id": "obj-3",
+        "values": {
+          "price": 999999999,
+          "area": null,
+          "condition": "poor",
+          "district": "center",
+          "parking": true
+        }
+      }
+    ]
+  },
+  "fields": [
+    {
+      "key": "price",
+      "field_type": "numeric",
+      "missing_strategy": "median",
+      "outlier_method": "iqr_clip",
+      "outlier_threshold": 1.5,
+      "normalization": "minmax"
+    },
+    {
+      "key": "area",
+      "field_type": "numeric",
+      "missing_strategy": "median",
+      "normalization": "robust"
+    },
+    {
+      "key": "condition",
+      "field_type": "categorical",
+      "encoding": "ordinal",
+      "ordinal_map": {
+        "poor": 0.2,
+        "good": 0.7,
+        "excellent": 1.0
+      }
+    },
+    {
+      "key": "district",
+      "field_type": "categorical",
+      "encoding": "one_hot"
+    },
+    {
+      "key": "parking",
+      "field_type": "binary",
+      "encoding": "binary_map",
+      "binary_map": {
+        "true": 1.0,
+        "false": 0.0
+      }
+    }
+  ],
+  "options": {
+    "drop_duplicate_rows": true,
+    "duplicate_keys": ["price", "area", "condition"],
+    "keep_columns_not_in_config": false,
+    "preserve_original_values": true
+  }
+}

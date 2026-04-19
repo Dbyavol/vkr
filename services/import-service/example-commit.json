@@ -1,0 +1,33 @@
+{
+  "dataset_name": "Imported Demo Dataset",
+  "object_type_code": "generic",
+  "source_filename": "demo.csv",
+  "dataset": {
+    "rows": [
+      {
+        "id": "1",
+        "values": {
+          "price": "12000000",
+          "area": "58.4",
+          "condition": "good",
+          "parking": "true"
+        }
+      },
+      {
+        "id": "2",
+        "values": {
+          "price": "11500000",
+          "area": "55.0",
+          "condition": "excellent",
+          "parking": "false"
+        }
+      }
+    ]
+  },
+  "schema_hint": {
+    "candidate_numeric_fields": ["price", "area"],
+    "candidate_categorical_fields": ["condition"],
+    "candidate_binary_fields": ["parking"]
+  },
+  "persist_to_storage": false
+}

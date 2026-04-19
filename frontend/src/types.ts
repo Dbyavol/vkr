@@ -1,4 +1,4 @@
-export type InferredType = "numeric" | "categorical" | "binary" | "text";
+export type InferredType = "numeric" | "categorical" | "binary" | "text" | "datetime";
 export type AnalysisMode = "rating" | "analog_search";
 
 export type PreviewColumn = {
@@ -84,6 +84,17 @@ export type DatasetProfileResponse = {
   quality: DatasetQualityReport;
   recommended_weights: Record<string, number>;
   weight_notes: string[];
+  missing_matrix_preview: Array<{
+    id: string;
+    missing_count: number;
+    missing_fields: string[];
+  }>;
+  correlation_matrix: Array<{
+    left_key: string;
+    right_key: string;
+    pearson: number;
+    samples: number;
+  }>;
 };
 
 export type PipelineProfileResponse = {
@@ -92,11 +103,18 @@ export type PipelineProfileResponse = {
   profile: DatasetProfileResponse;
 };
 
+export type PreprocessingRefreshResponse = {
+  preview: PreviewResponse;
+  profile: DatasetProfileResponse;
+  preprocessing_summary: Record<string, unknown>;
+};
+
 export type FieldConfig = {
   key: string;
   field_type: InferredType;
   include_in_output: boolean;
   missing_strategy: string;
+  missing_constant?: unknown;
   outlier_method: string;
   outlier_threshold: number;
   normalization: string;
@@ -114,10 +132,32 @@ export type CriterionConfig = {
   scale_map?: Record<string, number>;
 };
 
+export type AnalysisFilters = {
+  numeric_ranges?: Array<{
+    key: string;
+    min_value?: number | null;
+    max_value?: number | null;
+  }>;
+  categorical_allowlist?: Array<{
+    key: string;
+    values: string[];
+  }>;
+};
+
+export type RankingStabilityScenario = {
+  label: string;
+  variation_pct: number;
+  top_object_id?: string | null;
+  changed_positions: number;
+  top_n_overlap: number;
+  note: string;
+};
+
 export type PipelineResult = {
   import_preview: PreviewResponse;
   preprocessing_summary: Record<string, unknown>;
   analysis_summary: Record<string, unknown>;
+  history_id?: number | null;
   ranking: Array<{
     object_id: string;
     title: string;

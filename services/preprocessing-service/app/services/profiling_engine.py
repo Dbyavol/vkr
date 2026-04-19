@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime
+from math import sqrt
 from statistics import mean, median
 from typing import Any
 
@@ -34,6 +36,35 @@ def _to_float(value: Any) -> float | None:
     return None
 
 
+def _to_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    normalized = text.replace("Z", "+00:00")
+    formats = (
+        None,
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+        "%d.%m.%Y",
+        "%d-%m-%Y",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y/%m/%d %H:%M:%S",
+        "%d.%m.%Y %H:%M:%S",
+    )
+    for fmt in formats:
+        try:
+            if fmt is None:
+                return datetime.fromisoformat(normalized)
+            return datetime.strptime(normalized, fmt)
+        except ValueError:
+            continue
+    return None
+
+
 def _percentile(sorted_values: list[float], fraction: float) -> float:
     if not sorted_values:
         return 0.0
@@ -52,6 +83,9 @@ def _infer_type(values: list[Any], unique_ratio: float) -> str:
     lowered = {str(value).strip().lower() for value in non_missing}
     if lowered <= {"true", "false", "0", "1", "yes", "no", "да", "нет"} and len(lowered) <= 2:
         return "binary"
+    datetime_count = sum(1 for value in non_missing if _to_datetime(value) is not None)
+    if datetime_count / len(non_missing) >= 0.8:
+        return "datetime"
     numeric_count = sum(1 for value in non_missing if _to_float(value) is not None)
     if numeric_count / len(non_missing) >= 0.9:
         return "numeric"
@@ -89,6 +123,66 @@ def _ordinal_map(values: list[Any]) -> dict[str, float]:
     if not unique:
         return {}
     return {value: round((index + 1) / len(unique), 4) for index, value in enumerate(unique)}
+
+
+def _pearson(x_values: list[float], y_values: list[float]) -> float | None:
+    if len(x_values) < 3 or len(y_values) < 3 or len(x_values) != len(y_values):
+        return None
+    x_mean = mean(x_values)
+    y_mean = mean(y_values)
+    numerator = sum((x - x_mean) * (y - y_mean) for x, y in zip(x_values, y_values, strict=False))
+    denominator_x = sqrt(sum((x - x_mean) ** 2 for x in x_values))
+    denominator_y = sqrt(sum((y - y_mean) ** 2 for y in y_values))
+    denominator = denominator_x * denominator_y
+    if denominator == 0:
+        return None
+    return round(numerator / denominator, 4)
+
+
+def _build_missing_matrix(rows: list[Any], keys: list[str], limit: int = 120) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        missing_fields = [key for key in keys if _is_missing(row.values.get(key))]
+        if not missing_fields:
+            continue
+        result.append(
+            {
+                "id": row.id,
+                "missing_count": len(missing_fields),
+                "missing_fields": missing_fields,
+            }
+        )
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _build_correlation_matrix(rows: list[Any], numeric_keys: list[str], limit: int = 60) -> list[dict[str, Any]]:
+    pairs: list[dict[str, Any]] = []
+    for index, left_key in enumerate(numeric_keys):
+        for right_key in numeric_keys[index + 1 :]:
+            x_values: list[float] = []
+            y_values: list[float] = []
+            for row in rows:
+                left = _to_float(row.values.get(left_key))
+                right = _to_float(row.values.get(right_key))
+                if left is None or right is None:
+                    continue
+                x_values.append(left)
+                y_values.append(right)
+            correlation = _pearson(x_values, y_values)
+            if correlation is None:
+                continue
+            pairs.append(
+                {
+                    "left_key": left_key,
+                    "right_key": right_key,
+                    "pearson": correlation,
+                    "samples": len(x_values),
+                }
+            )
+    pairs.sort(key=lambda item: abs(float(item["pearson"])), reverse=True)
+    return pairs[:limit]
 
 
 def _profile_field(key: str, values: list[Any], rows_total: int, max_unique_values: int, histogram_bins: int) -> FieldProfile:
@@ -183,6 +277,26 @@ def _profile_field(key: str, values: list[Any], rows_total: int, max_unique_valu
             )
         )
 
+    if inferred_type == "datetime":
+        config.include_in_output = False
+        recommendations.append(
+            FieldRecommendation(
+                code="DERIVE_DATETIME_FEATURES",
+                severity="info",
+                message="Datetime-признак лучше разложить на производные поля (год, месяц, день, день недели).",
+                suggested_patch={"field_type": "datetime", "include_in_output": False},
+            )
+        )
+        if missing_count:
+            recommendations.append(
+                FieldRecommendation(
+                    code="FILL_DATETIME_MISSING",
+                    severity="warning",
+                    message="Есть пропуски в datetime-поле, проверьте заполнение или удаление строк перед генерацией признаков.",
+                    suggested_patch={"missing_strategy": "none"},
+                )
+            )
+
     text_to_categorical_possible = inferred_type == "text" and 1 < unique_count <= max_unique_values and unique_ratio <= 0.7
     if text_to_categorical_possible:
         config.field_type = "categorical"
@@ -242,12 +356,15 @@ def profile_dataset(payload: DatasetProfileRequest) -> DatasetProfileResponse:
         for key in keys
     ]
     weights, notes = _recommended_weights(fields)
+    numeric_keys = [field.key for field in fields if field.inferred_type == "numeric"]
     return DatasetProfileResponse(
         rows_total=len(rows),
         fields=fields,
         quality=_quality_report(fields, len(rows)),
         recommended_weights=weights,
         weight_notes=notes,
+        missing_matrix_preview=_build_missing_matrix(rows, keys),
+        correlation_matrix=_build_correlation_matrix(rows, numeric_keys),
     )
 
 

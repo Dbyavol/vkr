@@ -34,6 +34,36 @@ class AnalysisDataset(BaseModel):
     objects: list[DatasetObject]
 
 
+class NumericRangeFilter(BaseModel):
+    key: str
+    min_value: float | None = None
+    max_value: float | None = None
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> "NumericRangeFilter":
+        if self.min_value is None and self.max_value is None:
+            raise ValueError("numeric range filter requires min_value or max_value")
+        if self.min_value is not None and self.max_value is not None and self.min_value > self.max_value:
+            raise ValueError("numeric range filter min_value must be <= max_value")
+        return self
+
+
+class CategoricalAllowlistFilter(BaseModel):
+    key: str
+    values: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_values(self) -> "CategoricalAllowlistFilter":
+        if not self.values:
+            raise ValueError("categorical allowlist filter must contain at least one value")
+        return self
+
+
+class AnalysisFilters(BaseModel):
+    numeric_ranges: list[NumericRangeFilter] = Field(default_factory=list)
+    categorical_allowlist: list[CategoricalAllowlistFilter] = Field(default_factory=list)
+
+
 class AnalysisRequest(BaseModel):
     dataset: AnalysisDataset
     criteria: list[CriterionConfig]
@@ -42,6 +72,9 @@ class AnalysisRequest(BaseModel):
     top_n: int = Field(default=10, ge=1)
     auto_normalize_weights: bool = True
     include_explanations: bool = True
+    filter_criteria: AnalysisFilters | None = None
+    include_stability_scenarios: bool = False
+    stability_variation_pct: float = Field(default=10.0, ge=0.0, le=100.0)
 
     @model_validator(mode="after")
     def validate_payload(self) -> "AnalysisRequest":
@@ -94,6 +127,15 @@ class DominancePair(BaseModel):
     criteria_count: int
 
 
+class RankingStabilityScenario(BaseModel):
+    label: str
+    variation_pct: float
+    top_object_id: str | None = None
+    changed_positions: int = 0
+    top_n_overlap: int = 0
+    note: str
+
+
 class AnalysisSummary(BaseModel):
     objects_count: int
     criteria_count: int
@@ -107,6 +149,7 @@ class AnalysisSummary(BaseModel):
     confidence_notes: list[str] = []
     sensitivity: list[CriterionSensitivity] = []
     ranking_stability_note: str | None = None
+    ranking_stability_scenarios: list[RankingStabilityScenario] = []
     analog_groups: list[AnalogGroup] = []
     dominance_pairs: list[DominancePair] = []
 

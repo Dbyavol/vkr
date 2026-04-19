@@ -10,6 +10,8 @@ from app.core_config import get_settings
 from app.schemas.pipeline import (
     ImportedPreview,
     PipelineConfig,
+    PipelinePreprocessRefreshRequest,
+    PipelinePreprocessRefreshResponse,
     PipelineProfileStoredResponse,
     PipelineRequest,
     PipelineRunResponse,
@@ -20,6 +22,7 @@ from app.services.pipeline_engine import (
     fetch_dataset_profile,
     fetch_preview,
     fetch_system_dashboard,
+    refresh_preprocessing_from_storage,
     run_pipeline_from_storage,
     run_pipeline_via_services,
     upload_and_profile_dataset,
@@ -184,6 +187,23 @@ async def pipeline_run_stored(
         raise HTTPException(
             status_code=400,
             detail={"code": "PIPELINE_VALIDATION_ERROR", "message": str(exc)},
+        ) from exc
+
+
+@app.post("/api/v1/pipeline/preprocess-refresh", response_model=PipelinePreprocessRefreshResponse)
+async def pipeline_preprocess_refresh(payload: PipelinePreprocessRefreshRequest) -> PipelinePreprocessRefreshResponse:
+    try:
+        data = await refresh_preprocessing_from_storage(
+            settings=settings,
+            dataset_file_id=payload.dataset_file_id,
+            filename=payload.filename,
+            fields=[field.model_dump() for field in payload.fields],
+        )
+        return PipelinePreprocessRefreshResponse.model_validate(data)
+    except (ValueError, httpx.HTTPError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "PIPELINE_PREPROCESSING_REFRESH_ERROR", "message": str(exc)},
         ) from exc
 
 

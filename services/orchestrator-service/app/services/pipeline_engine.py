@@ -172,6 +172,9 @@ async def analyze_dataset(
     target_row_id: str | None,
     mode: str,
     top_n: int,
+    filter_criteria: dict[str, Any] | None,
+    include_stability_scenarios: bool,
+    stability_variation_pct: float,
 ) -> dict[str, Any]:
     payload = {
         "dataset": _analysis_dataset(rows),
@@ -181,6 +184,9 @@ async def analyze_dataset(
         "top_n": top_n,
         "auto_normalize_weights": True,
         "include_explanations": True,
+        "filter_criteria": filter_criteria,
+        "include_stability_scenarios": include_stability_scenarios,
+        "stability_variation_pct": stability_variation_pct,
     }
     async with httpx.AsyncClient(timeout=settings.request_timeout_seconds, trust_env=False) as client:
         response = await client.post(
@@ -371,6 +377,9 @@ async def run_pipeline_via_services(
         target_row_id=payload.config.target_row_id,
         mode=payload.config.analysis_mode,
         top_n=payload.config.top_n,
+        filter_criteria=payload.config.filter_criteria.model_dump() if payload.config.filter_criteria else None,
+        include_stability_scenarios=payload.config.include_stability_scenarios,
+        stability_variation_pct=payload.config.stability_variation_pct,
     )
     response_payload = PipelineRunResponse(
         import_preview=lightweight_preview(preview),
@@ -378,7 +387,7 @@ async def run_pipeline_via_services(
         analysis_summary=analysis["summary"],
         ranking=analysis["ranking"],
     )
-    await save_comparison_history(
+    history_item = await save_comparison_history(
         settings=settings,
         user=user,
         filename=filename,
@@ -387,6 +396,7 @@ async def run_pipeline_via_services(
         result=response_payload.model_dump(),
         dataset_file_id=dataset_file_id,
     )
+    response_payload.history_id = history_item.get("id") if history_item else None
     return response_payload
 
 
@@ -409,3 +419,90 @@ async def run_pipeline_from_storage(
         authorization=authorization,
         dataset_file_id=dataset_file_id,
     )
+
+
+def _is_missing(value: Any) -> bool:
+    return value is None or value == ""
+
+
+def _build_preview_from_processed(
+    *,
+    filename: str,
+    rows: list[dict[str, Any]],
+    profile: dict[str, Any],
+    warnings: list[str] | None = None,
+) -> dict[str, Any]:
+    profile_fields = list(profile.get("fields") or [])
+    profile_by_key = {str(item.get("key")): item for item in profile_fields if item.get("key")}
+    ordered_keys = [str(item.get("key")) for item in profile_fields if item.get("key")]
+    if not ordered_keys and rows:
+        ordered_keys = list((rows[0].get("values") or {}).keys())
+
+    normalized_rows = [
+        {
+            "id": str(row.get("id", "")),
+            "values": dict(row.get("values") or {}),
+        }
+        for row in rows
+    ]
+
+    columns: list[dict[str, Any]] = []
+    for key in ordered_keys:
+        values = [row["values"].get(key) for row in normalized_rows]
+        non_missing = [value for value in values if not _is_missing(value)]
+        unique_count = len({str(value) for value in non_missing})
+        sample_values = non_missing[:5]
+        field_profile = profile_by_key.get(key) or {}
+        columns.append(
+            {
+                "source_name": key,
+                "normalized_name": key,
+                "inferred_type": field_profile.get("inferred_type", "text"),
+                "missing_count": len(values) - len(non_missing),
+                "unique_count": unique_count,
+                "sample_values": sample_values,
+            }
+        )
+
+    preview_rows = []
+    for row in normalized_rows[:50]:
+        preview_rows.append({"id": row["id"], **row["values"]})
+
+    return {
+        "filename": filename,
+        "rows_total": len(normalized_rows),
+        "columns": columns,
+        "preview_rows": preview_rows,
+        "warnings": warnings or [],
+        "normalized_dataset": {"rows": normalized_rows},
+    }
+
+
+async def refresh_preprocessing_from_storage(
+    *,
+    settings: Settings,
+    dataset_file_id: int,
+    filename: str | None,
+    fields: list[dict[str, Any]],
+) -> dict[str, Any]:
+    metadata = await fetch_stored_file_metadata(settings=settings, file_id=dataset_file_id)
+    body = await fetch_stored_file_body(settings=settings, file_id=dataset_file_id)
+    resolved_filename = filename or metadata.get("original_name") or "dataset"
+    import_preview = await fetch_preview(settings=settings, filename=resolved_filename, body=body)
+    preprocessing = await preprocess_dataset(
+        settings=settings,
+        rows=import_preview["normalized_dataset"]["rows"],
+        fields=fields,
+    )
+    profile = await profile_imported_dataset(settings=settings, rows=preprocessing["dataset"])
+    refreshed_preview = _build_preview_from_processed(
+        filename=resolved_filename,
+        rows=preprocessing["dataset"],
+        profile=profile,
+        warnings=list(import_preview.get("warnings") or []),
+    )
+    return {
+        "preview": lightweight_preview(refreshed_preview),
+        "profile": profile,
+        "preprocessing_summary": preprocessing.get("summary") or {},
+    }

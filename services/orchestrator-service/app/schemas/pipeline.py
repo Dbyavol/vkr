@@ -26,7 +26,7 @@ class ImportedPreview(BaseModel):
     normalized_dataset: dict[str, list[PipelineRow]]
 
 
-FieldType = Literal["numeric", "categorical", "binary", "text"]
+FieldType = Literal["numeric", "categorical", "binary", "text", "datetime"]
 MissingStrategy = Literal["none", "drop_row", "mean", "median", "mode", "constant"]
 OutlierMethod = Literal["none", "iqr_remove", "iqr_clip", "zscore_remove", "zscore_clip"]
 NormalizationMethod = Literal["none", "minmax", "zscore", "robust", "log_minmax"]
@@ -60,12 +60,31 @@ class CriterionConfig(BaseModel):
     target_value: Any | None = None
 
 
+class NumericRangeFilter(BaseModel):
+    key: str
+    min_value: float | None = None
+    max_value: float | None = None
+
+
+class CategoricalAllowlistFilter(BaseModel):
+    key: str
+    values: list[str] = Field(default_factory=list)
+
+
+class AnalysisFilters(BaseModel):
+    numeric_ranges: list[NumericRangeFilter] = Field(default_factory=list)
+    categorical_allowlist: list[CategoricalAllowlistFilter] = Field(default_factory=list)
+
+
 class PipelineConfig(BaseModel):
     fields: list[FieldConfig]
     criteria: list[CriterionConfig]
     target_row_id: str | None = None
     analysis_mode: Literal["rating", "analog_search"] = "rating"
     top_n: int = 10
+    filter_criteria: AnalysisFilters | None = None
+    include_stability_scenarios: bool = False
+    stability_variation_pct: float = Field(default=10.0, ge=0.0, le=100.0)
     project_id: int | None = None
     scenario_title: str | None = None
     parent_history_id: int | None = None
@@ -80,6 +99,18 @@ class PipelineStoredRunRequest(BaseModel):
     filename: str | None = None
     dataset_file_id: int
     config: PipelineConfig
+
+
+class PipelinePreprocessRefreshRequest(BaseModel):
+    filename: str | None = None
+    dataset_file_id: int
+    fields: list[FieldConfig]
+
+
+class PipelinePreprocessRefreshResponse(BaseModel):
+    preview: ImportedPreview
+    profile: dict[str, Any]
+    preprocessing_summary: dict[str, Any]
 
 
 class PipelineProfileStoredResponse(BaseModel):
@@ -113,6 +144,7 @@ class PipelineRunResponse(BaseModel):
     preprocessing_summary: dict[str, Any]
     analysis_summary: dict[str, Any]
     ranking: list[RankedResult]
+    history_id: int | None = None
 
 
 class ReportRequest(BaseModel):

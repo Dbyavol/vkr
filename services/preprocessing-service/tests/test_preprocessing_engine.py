@@ -84,3 +84,32 @@ def test_preprocessing_creates_one_hot_columns() -> None:
     result = preprocess_dataset(payload)
     assert "kind__a" in result.summary.generated_columns
     assert "kind__b" in result.summary.generated_columns
+
+
+def test_preprocessing_derives_datetime_columns() -> None:
+    payload = PreprocessingRequest.model_validate(
+        {
+            "dataset": {
+                "rows": [
+                    {"id": "1", "values": {"created_at": "2026-04-19"}},
+                    {"id": "2", "values": {"created_at": "2025-12-31 10:20:30"}},
+                ]
+            },
+            "fields": [
+                {
+                    "key": "created_at",
+                    "field_type": "datetime",
+                    "include_in_output": False,
+                }
+            ],
+        }
+    )
+
+    result = preprocess_dataset(payload)
+
+    assert "created_at__year" in result.summary.generated_columns
+    assert "created_at__month" in result.summary.generated_columns
+    assert "created_at__day" in result.summary.generated_columns
+    assert "created_at__day_of_week" in result.summary.generated_columns
+    assert "created_at" not in result.dataset[0].values
+    assert result.dataset[0].values["created_at__year"] == 2026.0

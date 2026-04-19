@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  bindReportToHistory,
   createProject,
   downloadDocxReport,
   fetchAdminStats,
@@ -10,8 +11,10 @@ import {
   fetchSystemDashboard,
   login,
   profileFile,
+  refreshPreprocessing,
   register,
   runPipeline,
+  uploadReportFile,
 } from "./api";
 import type {
   AdminStats,
@@ -26,10 +29,12 @@ import type {
   PreviewResponse,
   DatasetQualityReport,
   ProjectItem,
+  RankingStabilityScenario,
   SystemDashboard,
 } from "./types";
 
 type StageId = "data" | "preprocessing" | "criteria" | "results" | "projects" | "history" | "admin";
+type PrepSectionId = "types" | "missing" | "outliers";
 
 const stages: Array<{ id: StageId; title: string; caption: string }> = [
   { id: "data", title: "Данные", caption: "Загрузка и предпросмотр" },
@@ -37,6 +42,12 @@ const stages: Array<{ id: StageId; title: string; caption: string }> = [
   { id: "criteria", title: "Критерии", caption: "Веса и направления" },
   { id: "results", title: "Результаты", caption: "Рейтинг и отчет" },
   { id: "admin", title: "Админ", caption: "Дэшборд системы" },
+];
+
+const prepSections: Array<{ id: PrepSectionId; title: string; caption: string }> = [
+  { id: "types", title: "Типы данных", caption: "Единый выбор типа по колонкам" },
+  { id: "missing", title: "Пропуски", caption: "Строки с missing и действие по колонке" },
+  { id: "outliers", title: "Выбросы", caption: "Графики и действие по числовым колонкам" },
 ];
 
 const numericNameHints = ["price", "cost", "area", "rating", "score", "days", "months", "amount", "value"];
@@ -84,39 +95,36 @@ function numericSamples(column?: PreviewColumn) {
     .filter((value) => Number.isFinite(value));
 }
 
-function recommendationFor(field: FieldConfig, column?: PreviewColumn, fieldProfile?: FieldProfile) {
-  if (fieldProfile?.recommendations.length) {
-    return fieldProfile.recommendations.map((recommendation) => recommendation.message);
-  }
-  const notes: string[] = [];
-  const samples = numericSamples(column);
-  if (field.field_type === "numeric") {
-    notes.push("Для расчета обычно нужна нормализация: minmax для рейтинга, robust при сильных выбросах.");
-    if ((column?.missing_count ?? 0) > 0) {
-      notes.push("Есть пропуски. Для числового поля безопасный вариант: median.");
-    }
-    if (samples.length >= 3) {
-      const min = Math.min(...samples);
-      const max = Math.max(...samples);
-      const avg = samples.reduce((sum, item) => sum + item, 0) / samples.length;
-      if (max > avg * 3 || min < avg / 3) {
-        notes.push("В примерах заметен возможный выброс. Проверьте iqr_clip или robust normalization.");
-      }
-    }
-  }
-  if (field.field_type === "categorical") {
-    notes.push("Если категории имеют порядок предпочтения, используйте ordinal encoding и задайте шкалу.");
-    if ((column?.unique_count ?? 0) > 12) {
-      notes.push("Много уникальных значений. Возможно, это справочник или текст, а не критерий.");
-    }
-  }
-  if (field.field_type === "binary") {
-    notes.push("Для бинарного признака обычно подходит binary_map: true = 1, false = 0.");
-  }
-  if (field.field_type === "text") {
-    notes.push("Текстовые поля чаще используют как описание, а не как критерий расчета.");
-  }
-  return notes;
+function percentile(values: number[], fraction: number) {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const index = (sorted.length - 1) * fraction;
+  const lower = Math.floor(index);
+  const upper = Math.ceil(index);
+  if (lower === upper) return sorted[lower];
+  return sorted[lower] + (sorted[upper] - sorted[lower]) * (index - lower);
+}
+
+function outlierRowsForField(preview: PreviewResponse | null, key: string, limit = 8) {
+  const rows = preview?.normalized_dataset?.rows ?? [];
+  if (!rows.length) return [];
+
+  const numericRows = rows
+    .map((row) => ({ rowId: row.id, value: Number(String(row.values[key] ?? "").replace(",", ".")) }))
+    .filter((item) => Number.isFinite(item.value));
+
+  if (numericRows.length < 4) return [];
+  const values = numericRows.map((item) => item.value);
+  const q1 = percentile(values, 0.25);
+  const q3 = percentile(values, 0.75);
+  const iqr = q3 - q1;
+  const low = q1 - 1.5 * iqr;
+  const high = q3 + 1.5 * iqr;
+
+  return numericRows
+    .filter((item) => item.value < low || item.value > high)
+    .slice(0, limit)
+    .map((item) => ({ id: item.rowId, value: item.value }));
 }
 
 function MiniDistribution({ column, fieldProfile }: { column?: PreviewColumn; fieldProfile?: FieldProfile }) {
@@ -146,13 +154,153 @@ function MiniDistribution({ column, fieldProfile }: { column?: PreviewColumn; fi
   );
 }
 
-function criteriaDefaults(fields: FieldConfig[]): CriterionConfig[] {
-  const analyticFields = fields.filter((field) => field.field_type !== "text" && field.include_in_output);
-  const weight = analyticFields.length ? Number((1 / analyticFields.length).toFixed(4)) : 1;
+function DistributionChart({
+  column,
+  fieldProfile,
+  title,
+  rawValues,
+}: {
+  column?: PreviewColumn;
+  fieldProfile?: FieldProfile;
+  title: string;
+  rawValues?: number[];
+}) {
+  const [showWhiskers, setShowWhiskers] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const histogram = fieldProfile?.histogram ?? [];
+  const values = (rawValues && rawValues.length ? rawValues : numericSamples(column)).filter((value) => Number.isFinite(value));
+  const maxValue = Math.max(...histogram.map((point) => point.value), values.length || 1, 1);
+
+  if (!histogram.length && values.length < 2) {
+    return <p className="muted-note">Недостаточно данных для графика {title.toLowerCase()}.</p>;
+  }
+
+  const series = histogram.length
+    ? histogram
+    : values.slice(0, 14).map((value, index) => ({ label: String(index + 1), value }));
+
+  const sorted = [...values].sort((a, b) => a - b);
+  const q1 = percentile(sorted, 0.25);
+  const median = percentile(sorted, 0.5);
+  const q3 = percentile(sorted, 0.75);
+  const iqr = q3 - q1;
+  const lowerFence = q1 - 1.5 * iqr;
+  const upperFence = q3 + 1.5 * iqr;
+  const inliers = sorted.filter((value) => value >= lowerFence && value <= upperFence);
+  const whiskerMin = inliers.length ? inliers[0] : sorted[0];
+  const whiskerMax = inliers.length ? inliers[inliers.length - 1] : sorted[sorted.length - 1];
+  const outliers = sorted.filter((value) => value < lowerFence || value > upperFence);
+  const minValue = sorted[0] ?? 0;
+  const maxRawValue = sorted[sorted.length - 1] ?? 1;
+
+  const renderHistogram = (width: number, height: number) => {
+    const barWidth = Math.max(10, Math.floor(width / Math.max(series.length, 1)) - 8);
+    const labelStep = Math.max(1, Math.ceil(series.length / 12));
+    return (
+      <svg width="100%" height={height + 52} viewBox={`0 0 ${width} ${height + 52}`} role="img" aria-label={title}>
+        <rect x="0" y="0" width={width} height={height} fill="#f8fafc" stroke="#d7dde8" />
+        <line x1="0" y1={height} x2={width} y2={height} stroke="#4b5563" strokeWidth="1" />
+        <line x1="0" y1={Math.round(height * 0.75)} x2={width} y2={Math.round(height * 0.75)} stroke="#e1e8f0" strokeWidth="1" />
+        <line x1="0" y1={Math.round(height * 0.5)} x2={width} y2={Math.round(height * 0.5)} stroke="#e1e8f0" strokeWidth="1" />
+        <line x1="0" y1={Math.round(height * 0.25)} x2={width} y2={Math.round(height * 0.25)} stroke="#e1e8f0" strokeWidth="1" />
+        {series.map((point, index) => {
+          const x = 4 + index * (barWidth + 8);
+          const barHeight = Math.max(2, Math.round((point.value / maxValue) * (height - 12)));
+          const y = height - barHeight;
+          const shouldShowLabel = index % labelStep === 0 || index === series.length - 1;
+          return (
+            <g key={point.label}>
+              <rect x={x} y={y} width={barWidth} height={barHeight} fill="#2f6b9a" opacity="0.9" rx="2" />
+              {shouldShowLabel ? (
+                <text
+                  x={x + barWidth / 2}
+                  y={height + 16}
+                  fontSize="10"
+                  textAnchor="middle"
+                  fill="#334155"
+                >
+                  {point.label}
+                </text>
+              ) : null}
+            </g>
+          );
+        })}
+      </svg>
+    );
+  };
+
+  const renderBoxPlot = (width: number) => {
+    const scaleX = (value: number) => {
+      const range = maxRawValue - minValue || 1;
+      return 24 + ((value - minValue) / range) * (width - 48);
+    };
+    return (
+      <svg width="100%" height="148" viewBox={`0 0 ${width} 148`} role="img" aria-label={`${title} boxplot`}>
+        <rect x="0" y="26" width={width} height="72" fill="#f8fafc" stroke="#d7dde8" />
+        <line x1="24" y1="62" x2={width - 24} y2="62" stroke="#6b7280" strokeWidth="1" />
+        <line x1={scaleX(whiskerMin)} y1="42" x2={scaleX(whiskerMin)} y2="82" stroke="#334155" strokeWidth="1.5" />
+        <line x1={scaleX(whiskerMax)} y1="42" x2={scaleX(whiskerMax)} y2="82" stroke="#334155" strokeWidth="1.5" />
+        <line x1={scaleX(whiskerMin)} y1="62" x2={scaleX(q1)} y2="62" stroke="#334155" strokeWidth="1.5" />
+        <line x1={scaleX(q3)} y1="62" x2={scaleX(whiskerMax)} y2="62" stroke="#334155" strokeWidth="1.5" />
+        <rect x={scaleX(q1)} y="42" width={Math.max(2, scaleX(q3) - scaleX(q1))} height="40" fill="#dbeafe" stroke="#2563eb" strokeWidth="1.5" />
+        <line x1={scaleX(median)} y1="42" x2={scaleX(median)} y2="82" stroke="#1d4ed8" strokeWidth="2" />
+        {outliers.map((value, index) => (
+          <circle key={`outlier-${value}-${index}`} cx={scaleX(value)} cy="62" r="2.8" fill="#b42318" />
+        ))}
+        <text x="24" y="124" fontSize="10" fill="#334155">min: {minValue.toFixed(2)}</text>
+        <text x={width / 2 - 42} y="124" fontSize="10" fill="#334155">median: {median.toFixed(2)}</text>
+        <text x={width - 128} y="124" fontSize="10" fill="#334155">max: {maxRawValue.toFixed(2)}</text>
+      </svg>
+    );
+  };
+
+  return (
+    <div className="chart-frame" title={title}>
+      <div className="chart-toolbar">
+        <strong>{title}</strong>
+        <div className="chart-toggle">
+          <span>{showWhiskers ? "Box plot" : "Гистограмма"}</span>
+          <label className="switch" title="Переключить на график с усами">
+            <input type="checkbox" checked={showWhiskers} onChange={(event) => setShowWhiskers(event.target.checked)} />
+            <span />
+          </label>
+        </div>
+      </div>
+      <button className="chart-canvas-trigger" onClick={() => setExpanded(true)} title="Открыть график в большом виде">
+        {!showWhiskers ? renderHistogram(980, 260) : renderBoxPlot(980)}
+      </button>
+
+      {expanded ? (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => setExpanded(false)}>
+          <section className="chart-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="chart-modal-head">
+              <h3>{title}</h3>
+              <button className="modal-close" onClick={() => setExpanded(false)} aria-label="Закрыть">×</button>
+            </div>
+            <div className="chart-modal-body">
+              {!showWhiskers ? renderHistogram(1600, 440) : renderBoxPlot(1600)}
+            </div>
+          </section>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function formatPreviewCell(value: unknown) {
+  if (value === null || value === undefined || value === "") {
+    return "пусто";
+  }
+  return String(value);
+}
+
+function criteriaDefaults(fields: FieldConfig[], recommendedWeights?: Record<string, number>): CriterionConfig[] {
+  const analyticFields = fields.filter((field) => field.field_type !== "text" && field.field_type !== "datetime" && field.include_in_output);
+  const fallbackWeight = analyticFields.length ? Number((1 / analyticFields.length).toFixed(4)) : 1;
   return analyticFields.map((field) => ({
     key: field.key,
     name: field.key.replace(/_/g, " "),
-    weight,
+    weight: recommendedWeights?.[field.key] ?? fallbackWeight,
     type: field.field_type === "categorical" ? "categorical" : field.field_type === "binary" ? "binary" : "numeric",
     direction: minimizeHints.some((hint) => field.key.includes(hint)) ? "minimize" : "maximize",
     scale_map: field.ordinal_map ?? field.binary_map,
@@ -189,6 +337,7 @@ const SUMMARY_LABELS: Record<string, string> = {
   confidence_notes: "Замечания к качеству",
   sensitivity: "Чувствительность",
   ranking_stability_note: "Устойчивость рейтинга",
+  ranking_stability_scenarios: "Сценарии устойчивости",
   analog_groups: "Группы аналогов",
   dominance_pairs: "Доминирование объектов",
 };
@@ -252,6 +401,7 @@ const FIELD_TYPE_LABELS: Record<string, string> = {
   categorical: "Категориальный",
   binary: "Бинарный",
   text: "Текстовый",
+  datetime: "Дата/время",
 };
 
 const METHOD_LABELS: Record<string, string> = {
@@ -375,6 +525,10 @@ type SavedWorkflowState = {
   historyProjectFilter?: number | "all";
   scenarioTitle?: string;
   sourceFilename?: string;
+  preprocessingSection?: PrepSectionId;
+  missingMatrixPreview?: Array<{ id: string; missing_count: number; missing_fields: string[] }>;
+  correlationMatrix?: Array<{ left_key: string; right_key: string; pearson: number; samples: number }>;
+  lastHistoryId?: number | null;
 };
 
 const WORKFLOW_STORAGE_KEY = "comparison_workflow_state";
@@ -416,6 +570,18 @@ function summaryList<T>(summary: Record<string, unknown>, key: string): T[] {
 }
 
 function buildHtmlReport(result: PipelineResult, criteria: CriterionConfig[]) {
+  const maxScore = Math.max(...result.ranking.map((item) => item.score), 0.0001);
+  const rankingBars = result.ranking
+    .slice(0, 10)
+    .map(
+      (item) => `
+        <div class="rank-bar">
+          <span>${escapeHtml(item.title)}</span>
+          <div><i style="width:${Math.max(4, (item.score / maxScore) * 100)}%"></i></div>
+          <strong>${item.score.toFixed(4)}</strong>
+        </div>`,
+    )
+    .join("");
   const rows = result.ranking
     .map(
       (item) => `
@@ -481,11 +647,19 @@ function buildHtmlReport(result: PipelineResult, criteria: CriterionConfig[]) {
     th { background: #f2f5f9; }
     .metric { display: inline-block; margin: 8px 16px 8px 0; padding: 12px 16px; background: #f6f8fb; border-radius: 12px; }
     .note { padding: 14px 16px; border-radius: 12px; background: #eef7ff; }
+    .report-intro { margin: 14px 0 22px; line-height: 1.55; }
+    .rank-bars { display: grid; gap: 10px; margin: 18px 0 24px; }
+    .rank-bar { display: grid; grid-template-columns: minmax(180px, 1fr) 3fr auto; gap: 10px; align-items: center; }
+    .rank-bar div { height: 14px; border-radius: 999px; background: #e9eff7; overflow: hidden; }
+    .rank-bar i { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, #0078d4, #16a0f7); }
+    .rank-bar span { font-size: 13px; }
+    .rank-bar strong { font-size: 12px; color: #334155; }
   </style>
 </head>
 <body>
   <h1>Отчет сравнительного анализа</h1>
   <p>Сформировано: ${new Date().toLocaleString("ru-RU")}</p>
+  <p class="report-intro">Отчет показывает итоговый рейтинг объектов, вклад критериев, устойчивость результата и ключевые аналитические выводы на русском языке. Графики ниже помогают визуально сравнить лидеров по итоговому баллу.</p>
   <h2>Сводка</h2>
   ${summaryCards}
   <p class="note">${escapeHtml(translateAnalysisText(result.analysis_summary.ranking_stability_note ?? "Нет данных об устойчивости рейтинга."))}</p>
@@ -495,6 +669,8 @@ function buildHtmlReport(result: PipelineResult, criteria: CriterionConfig[]) {
   ${sensitivityRows ? `<h2>Чувствительность критериев</h2><table><thead><tr><th>Критерий</th><th>Вес</th><th>Разброс</th><th>Индекс</th><th>Пояснение</th></tr></thead><tbody>${sensitivityRows}</tbody></table>` : ""}
   ${analogRows ? `<h2>Группы аналогов</h2><table><thead><tr><th>Группа</th><th>Объекты</th></tr></thead><tbody>${analogRows}</tbody></table>` : ""}
   ${dominanceRows ? `<h2>Доминирование объектов</h2><table><thead><tr><th>Доминирующий объект</th><th>Уступающий объект</th><th>Критериев</th></tr></thead><tbody>${dominanceRows}</tbody></table>` : ""}
+  <h2>График итоговых оценок</h2>
+  <div class="rank-bars">${rankingBars}</div>
   <h2>Рейтинг</h2>
   <table><thead><tr><th>Место</th><th>Объект</th><th>Оценка</th><th>Объяснение</th></tr></thead><tbody>${rows}</tbody></table>
 </body>
@@ -715,14 +891,23 @@ export function App() {
   const [quality, setQuality] = useState<DatasetQualityReport | null>(savedWorkflow.quality ?? null);
   const [recommendedWeights, setRecommendedWeights] = useState<Record<string, number>>(savedWorkflow.recommendedWeights ?? {});
   const [weightNotes, setWeightNotes] = useState<string[]>(savedWorkflow.weightNotes ?? []);
+  const [missingMatrixPreview, setMissingMatrixPreview] = useState<Array<{ id: string; missing_count: number; missing_fields: string[] }>>(
+    savedWorkflow.missingMatrixPreview ?? [],
+  );
+  const [correlationMatrix, setCorrelationMatrix] = useState<Array<{ left_key: string; right_key: string; pearson: number; samples: number }>>(
+    savedWorkflow.correlationMatrix ?? [],
+  );
   const [fields, setFields] = useState<FieldConfig[]>(savedWorkflow.fields ?? []);
   const [criteria, setCriteria] = useState<CriterionConfig[]>(savedWorkflow.criteria ?? []);
   const [analysisMode, setAnalysisMode] = useState<AnalysisMode>(savedWorkflow.analysisMode ?? "analog_search");
   const [targetRowId, setTargetRowId] = useState(savedWorkflow.targetRowId ?? "");
   const [result, setResult] = useState<PipelineResult | null>(savedWorkflow.result ?? null);
   const [selectedResultId, setSelectedResultId] = useState(savedWorkflow.result?.ranking?.[0]?.object_id ?? "");
+  const [lastHistoryId, setLastHistoryId] = useState<number | null>(savedWorkflow.lastHistoryId ?? null);
+  const [preprocessingSection, setPreprocessingSection] = useState<PrepSectionId>(savedWorkflow.preprocessingSection ?? "types");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [applyingSection, setApplyingSection] = useState<PrepSectionId | null>(null);
 
   const totalWeight = useMemo(() => criteria.reduce((sum, item) => sum + Number(item.weight || 0), 0), [criteria]);
   const completedStages = {
@@ -749,6 +934,18 @@ export function App() {
     () => result?.ranking.find((item) => item.object_id === selectedResultId) ?? result?.ranking[0],
     [result, selectedResultId],
   );
+  const activeProjectLatestHistory = useMemo(() => {
+    if (!activeProjectId) return null;
+    return [...history]
+      .filter((item) => item.project_id === activeProjectId)
+      .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))[0] ?? null;
+  }, [history, activeProjectId]);
+  const missingRowsPreview = useMemo(() => {
+    const rows = preview?.normalized_dataset?.rows ?? [];
+    if (!rows.length || !missingMatrixPreview.length) return [];
+    const ids = new Set(missingMatrixPreview.map((item) => item.id));
+    return rows.filter((row) => ids.has(row.id)).slice(0, 14);
+  }, [preview, missingMatrixPreview]);
 
   const visibleStages = user?.role === "admin" ? stages : stages.filter((stage) => stage.id !== "admin");
 
@@ -782,16 +979,20 @@ export function App() {
     setQuality(null);
     setRecommendedWeights({});
     setWeightNotes([]);
+    setMissingMatrixPreview([]);
+    setCorrelationMatrix([]);
     setFields([]);
     setCriteria([]);
     setAnalysisMode("analog_search");
     setTargetRowId("");
     setResult(null);
     setSelectedResultId("");
+    setLastHistoryId(null);
     setActiveProjectId(null);
     setHistoryProjectFilter("all");
     setHistoryCompareIds([]);
     setScenarioTitle("Сценарий сравнительного анализа");
+    setPreprocessingSection("types");
     setReportPreviewOpen(false);
     setError(null);
     localStorage.removeItem(WORKFLOW_STORAGE_KEY);
@@ -852,6 +1053,11 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (!user) return;
+    void refreshHistory(false);
+  }, [user?.id]);
+
+  useEffect(() => {
     if (result?.ranking.length && !result.ranking.some((item) => item.object_id === selectedResultId)) {
       setSelectedResultId(result.ranking[0].object_id);
     }
@@ -866,6 +1072,8 @@ export function App() {
       quality,
       recommendedWeights,
       weightNotes,
+      missingMatrixPreview,
+      correlationMatrix,
       fields,
       criteria,
       analysisMode,
@@ -875,6 +1083,8 @@ export function App() {
       historyProjectFilter,
       scenarioTitle,
       sourceFilename,
+      preprocessingSection,
+      lastHistoryId,
     };
     localStorage.setItem(WORKFLOW_STORAGE_KEY, JSON.stringify(state));
   }, [
@@ -885,6 +1095,8 @@ export function App() {
     quality,
     recommendedWeights,
     weightNotes,
+    missingMatrixPreview,
+    correlationMatrix,
     fields,
     criteria,
     analysisMode,
@@ -894,6 +1106,8 @@ export function App() {
     historyProjectFilter,
     scenarioTitle,
     sourceFilename,
+    preprocessingSection,
+    lastHistoryId,
   ]);
 
   async function refreshHistory(openStage = true) {
@@ -945,9 +1159,104 @@ export function App() {
     try {
       const project = await createProject(user, newProjectName.trim(), "Пользовательский проект сравнительного анализа");
       setProjects((current) => [project, ...current]);
-      setActiveProjectId(project.id);
+      await handleProjectSelection(project.id);
     } catch (projectError) {
       setError(projectError instanceof Error ? projectError.message : "Не удалось создать проект");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleProjectSelection(projectId: number | null) {
+    setActiveProjectId(projectId);
+    setError(null);
+    setResult(null);
+    setSelectedResultId("");
+    if (!projectId || !user) {
+      setFile(null);
+      setDatasetFileId(null);
+      setSourceFilename("");
+      setPreview(null);
+      setProfile([]);
+      setQuality(null);
+      setRecommendedWeights({});
+      setWeightNotes([]);
+      setMissingMatrixPreview([]);
+      setCorrelationMatrix([]);
+      setFields([]);
+      setCriteria([]);
+      setTargetRowId("");
+      setLastHistoryId(null);
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const historySource = history.length ? history : await fetchHistory(user.id);
+      if (!history.length) {
+        setHistory(historySource);
+      }
+      const latest = [...historySource]
+        .filter((item) => item.project_id === projectId)
+        .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))[0];
+
+      if (!latest) {
+        setFile(null);
+        setDatasetFileId(null);
+        setSourceFilename("");
+        setPreview(null);
+        setProfile([]);
+        setQuality(null);
+        setRecommendedWeights({});
+        setWeightNotes([]);
+        setMissingMatrixPreview([]);
+        setCorrelationMatrix([]);
+        setFields([]);
+        setCriteria([]);
+        setTargetRowId("");
+        setLastHistoryId(null);
+        setScenarioTitle("Сценарий сравнительного анализа");
+        return;
+      }
+
+      const parameters = parseHistoryParameters(latest);
+      if (!parameters) {
+        throw new Error("Не удалось прочитать настройки выбранного проекта.");
+      }
+
+      const nextFields = Array.isArray(parameters.fields) ? parameters.fields : [];
+      const nextCriteria = Array.isArray(parameters.criteria) ? parameters.criteria : [];
+
+      setFile(null);
+      setFields(nextFields);
+      setCriteria(nextCriteria.length ? nextCriteria : criteriaDefaults(nextFields, recommendedWeights));
+      setTargetRowId(parameters.target_row_id ?? "");
+      setAnalysisMode(parameters.analysis_mode === "rating" ? "rating" : "analog_search");
+      setScenarioTitle(parameters.scenario_title ?? latest.title);
+      setDatasetFileId(latest.dataset_file_id ?? null);
+      setSourceFilename(latest.source_filename ?? "");
+      setLastHistoryId(latest.id);
+
+      if (latest.dataset_file_id && nextFields.length) {
+        const response = await refreshPreprocessing(latest.dataset_file_id, nextFields, latest.source_filename ?? undefined);
+        setPreview(response.preview);
+        setProfile(response.profile.fields);
+        setQuality(response.profile.quality);
+        setRecommendedWeights(response.profile.recommended_weights);
+        setWeightNotes(response.profile.weight_notes);
+        setMissingMatrixPreview(response.profile.missing_matrix_preview ?? []);
+        setCorrelationMatrix(response.profile.correlation_matrix ?? []);
+      } else {
+        setPreview(null);
+        setProfile([]);
+        setQuality(null);
+        setRecommendedWeights({});
+        setWeightNotes([]);
+        setMissingMatrixPreview([]);
+        setCorrelationMatrix([]);
+      }
+    } catch (selectionError) {
+      setError(selectionError instanceof Error ? selectionError.message : "Не удалось загрузить настройки проекта");
     } finally {
       setLoading(false);
     }
@@ -1014,8 +1323,10 @@ export function App() {
       setQuality(response.profile.quality);
       setRecommendedWeights(response.profile.recommended_weights);
       setWeightNotes(response.profile.weight_notes);
+      setMissingMatrixPreview(response.profile.missing_matrix_preview ?? []);
+      setCorrelationMatrix(response.profile.correlation_matrix ?? []);
       setFields(inferredFields);
-      setCriteria(criteriaDefaults(inferredFields));
+      setCriteria(criteriaDefaults(inferredFields, response.profile.recommended_weights));
       const firstRowId = response.preview.normalized_dataset?.rows?.[0]?.id ?? "";
       setTargetRowId(firstRowId);
     } catch (previewError) {
@@ -1042,9 +1353,13 @@ export function App() {
         undefined,
         datasetFileId,
         sourceFilename || file?.name,
+        undefined,
+        false,
+        10,
       );
       setResult(response);
       setSelectedResultId(response.ranking[0]?.object_id ?? "");
+      setLastHistoryId(response.history_id ?? null);
       setActiveStage("results");
       if (user) {
         void refreshHistory(false);
@@ -1058,6 +1373,32 @@ export function App() {
 
   function updateField(index: number, patch: Partial<FieldConfig>) {
     setFields((current) => current.map((item, idx) => (idx === index ? { ...item, ...patch } : item)));
+  }
+
+  async function applyPreprocessingSection(section: PrepSectionId) {
+    if (!datasetFileId) {
+      setError("Сначала загрузите и профилируйте датасет на этапе «Данные».");
+      return;
+    }
+    setApplyingSection(section);
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await refreshPreprocessing(datasetFileId, fields, sourceFilename || preview?.filename || undefined);
+      setPreview(response.preview);
+      setProfile(response.profile.fields);
+      setQuality(response.profile.quality);
+      setRecommendedWeights(response.profile.recommended_weights);
+      setWeightNotes(response.profile.weight_notes);
+      setMissingMatrixPreview(response.profile.missing_matrix_preview ?? []);
+      setCorrelationMatrix(response.profile.correlation_matrix ?? []);
+      setCriteria(criteriaDefaults(fields, response.profile.recommended_weights));
+    } catch (applyError) {
+      setError(applyError instanceof Error ? applyError.message : "Не удалось применить настройки предобработки");
+    } finally {
+      setLoading(false);
+      setApplyingSection(null);
+    }
   }
 
   function applyRecommendedFieldSettings(index: number) {
@@ -1113,24 +1454,41 @@ export function App() {
     });
   }
 
-  function applyRecommendedWeights() {
+  function setEqualWeights() {
     setCriteria((current) => {
-      const patched = current.map((item) => ({
-        ...item,
-        weight: recommendedWeights[item.key] ?? item.weight,
-      }));
+      if (!current.length) return current;
+      const weight = Number((1 / current.length).toFixed(4));
+      const patched = current.map((item) => ({ ...item, weight }));
       return patched;
     });
   }
 
+  function applyRecommendedWeights() {
+    setCriteria((current) =>
+      current.map((item) => ({
+        ...item,
+        weight: recommendedWeights[item.key] ?? item.weight,
+      })),
+    );
+  }
+
   function rebuildCriteria() {
-    setCriteria(criteriaDefaults(fields));
+    setCriteria(criteriaDefaults(fields, recommendedWeights));
     setActiveStage("criteria");
   }
 
   function exportHtmlReport() {
     if (!result) return;
     downloadBlob("comparison-report.html", reportHtml, "text/html;charset=utf-8");
+  }
+
+  async function storeReportFile(blob: Blob, filename: string) {
+    if (!lastHistoryId) return;
+    const reportFileId = await uploadReportFile(filename, blob);
+    await bindReportToHistory(lastHistoryId, reportFileId);
+    if (user) {
+      void refreshHistory(false);
+    }
   }
 
   async function exportDocxReport() {
@@ -1142,6 +1500,92 @@ export function App() {
     } catch (reportError) {
       setError(reportError instanceof Error ? reportError.message : "Не удалось скачать DOCX-отчет");
     } finally {
+      setLoading(false);
+    }
+  }
+
+  async function exportPdfReport() {
+    if (!result) return;
+    setLoading(true);
+    setError(null);
+    const mountNode = document.createElement("div");
+    try {
+      const parser = new DOMParser();
+      const parsed = parser.parseFromString(reportHtml, "text/html");
+      const bodyMarkup = parsed.body?.innerHTML || reportHtml;
+      mountNode.className = "report-pdf-mount";
+      mountNode.innerHTML = bodyMarkup;
+      Object.assign(mountNode.style, {
+        position: "fixed",
+        left: "-10000px",
+        top: "0",
+        width: "860px",
+        background: "#ffffff",
+        padding: "24px",
+        zIndex: "-1",
+      });
+      document.body.appendChild(mountNode);
+
+      const [{ jsPDF }, { default: html2canvas }] = await Promise.all([import("jspdf"), import("html2canvas")]);
+      const documentPdf = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
+
+      const canvas = await html2canvas(mountNode, {
+        scale: 2,
+        useCORS: true,
+        backgroundColor: "#ffffff",
+      });
+
+      const marginLeft = 20;
+      const marginTop = 24;
+      const marginBottom = 24;
+      const pageWidth = documentPdf.internal.pageSize.getWidth();
+      const pageHeight = documentPdf.internal.pageSize.getHeight();
+      const contentWidth = pageWidth - marginLeft * 2;
+      const contentHeight = pageHeight - marginTop - marginBottom;
+
+      const pxPerPt = canvas.width / contentWidth;
+      const pageHeightPx = Math.max(1, Math.floor(contentHeight * pxPerPt));
+      let renderedPx = 0;
+      let pageIndex = 0;
+
+      while (renderedPx < canvas.height) {
+        const sliceHeightPx = Math.min(pageHeightPx, canvas.height - renderedPx);
+        const pageCanvas = document.createElement("canvas");
+        pageCanvas.width = canvas.width;
+        pageCanvas.height = sliceHeightPx;
+
+        const context = pageCanvas.getContext("2d");
+        if (!context) {
+          throw new Error("Не удалось сформировать PDF-страницу");
+        }
+
+        context.drawImage(canvas, 0, renderedPx, canvas.width, sliceHeightPx, 0, 0, canvas.width, sliceHeightPx);
+        const imageData = pageCanvas.toDataURL("image/png");
+        const sliceHeightPt = (sliceHeightPx / canvas.width) * contentWidth;
+
+        if (pageIndex > 0) {
+          documentPdf.addPage();
+        }
+
+        documentPdf.addImage(imageData, "PNG", marginLeft, marginTop, contentWidth, sliceHeightPt, undefined, "FAST");
+        renderedPx += sliceHeightPx;
+        pageIndex += 1;
+      }
+
+      const blob = documentPdf.output("blob");
+      const fileName = "comparison-report.pdf";
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = fileName;
+      link.click();
+      URL.revokeObjectURL(url);
+
+      await storeReportFile(blob, fileName);
+    } catch (reportError) {
+      setError(reportError instanceof Error ? reportError.message : "Не удалось сформировать PDF-отчет");
+    } finally {
+      mountNode.remove();
       setLoading(false);
     }
   }
@@ -1182,11 +1626,6 @@ export function App() {
           ))}
         </nav>
 
-        <div className="sidebar-card">
-          <span>Сумма весов</span>
-          <strong>{totalWeight.toFixed(3)}</strong>
-          <small>{Math.abs(totalWeight - 1) < 0.001 ? "Готово к расчету" : "Будет нормализовано автоматически"}</small>
-        </div>
       </aside>
 
       <main className="workspace">
@@ -1241,6 +1680,44 @@ export function App() {
 
         {activeStage === "data" ? (
           <section className="data-stage">
+            <div className="panel project-entry-panel">
+              <div className="panel-head">
+                <div>
+                  <span className="section-kicker">Проект</span>
+                  <h2>Выберите проект перед началом</h2>
+                  <p>При выборе проекта автоматически подгружается последний сценарий: настройки, критерии и сохраненный датасет.</p>
+                </div>
+              </div>
+              {user ? (
+                <div className="project-panel">
+                  <label>
+                    Текущий проект
+                    <select
+                      value={activeProjectId ?? ""}
+                      onChange={(event) => void handleProjectSelection(event.target.value ? Number(event.target.value) : null)}
+                    >
+                      <option value="">Без проекта</option>
+                      {projects.map((project) => (
+                        <option key={project.id} value={project.id}>{project.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Новый проект
+                    <input value={newProjectName} onChange={(event) => setNewProjectName(event.target.value)} placeholder="Например: ЖК Май 2026" />
+                  </label>
+                  <button className="ghost-button" onClick={handleCreateProject} disabled={loading || !newProjectName.trim()}>
+                    Создать проект
+                  </button>
+                </div>
+              ) : (
+                <p className="muted-note">Авторизуйтесь, чтобы выбрать проект и подтянуть сохраненные настройки автоматически.</p>
+              )}
+              {activeProjectId && activeProjectLatestHistory ? (
+                <p className="muted-note">Подтянут сценарий: {activeProjectLatestHistory.title} от {new Date(activeProjectLatestHistory.created_at).toLocaleString("ru-RU")}</p>
+              ) : null}
+            </div>
+
             <div className="panel hero-panel">
               <div className="hero-copy">
                 <span className="section-kicker">Этап 1</span>
@@ -1382,7 +1859,7 @@ export function App() {
                 {quality ? (
                   <div className={`quality-card ${quality.level}`}>
                     <div className="quality-score">
-                      <span>Качество данных</span>
+                      <span>Индекс качества датасета</span>
                       <strong>{quality.score.toFixed(0)}</strong>
                       <small>{translateQualityText(quality.readiness_label)}</small>
                     </div>
@@ -1393,131 +1870,217 @@ export function App() {
                         <div><span>Выбросов IQR</span><strong>{quality.total_outliers_iqr}</strong></div>
                         <div><span>Текстовых полей</span><strong>{quality.text_fields_count}</strong></div>
                       </div>
-                      {quality.issues.length > 0 ? (
-                        <div className="quality-issues">
-                          {quality.issues.slice(0, 4).map((issue) => (
-                            <p key={issue.code}>
-                              <b>{translateStatus(issue.severity)}</b> · {translateQualityText(issue.message)}
-                              {issue.affected_fields.length ? ` Поля: ${issue.affected_fields.slice(0, 4).join(", ")}` : ""}
-                            </p>
-                          ))}
-                        </div>
-                      ) : (
-                        <p className="quality-ok">Серьезных проблем с качеством данных не найдено.</p>
-                      )}
                     </div>
                   </div>
                 ) : null}
-                <div className="prep-summary">
-                  <div className="metric">
-                    <span>Полей</span>
-                    <strong>{fields.length}</strong>
-                  </div>
-                  <div className="metric">
-                    <span>С пропусками</span>
-                    <strong>{preview?.columns.filter((column) => column.missing_count > 0).length ?? 0}</strong>
-                  </div>
-                  <div className="metric">
-                    <span>Числовых кандидатов</span>
-                    <strong>{fields.filter((field) => field.field_type === "numeric").length}</strong>
-                  </div>
-                  <div className="metric">
-                    <span>Активных преобразований</span>
-                    <strong>{fields.filter((field) => field.normalization !== "none" || field.encoding !== "none" || field.outlier_method !== "none" || field.missing_strategy !== "none").length}</strong>
-                  </div>
-                </div>
-                <div className="field-board">
-                  {fields.map((field, index) => (
-                    <article className="field-card" key={field.key}>
-                    <div className="field-card-head">
-                      <div>
-                        <strong>{field.key}</strong>
-                        <span>{fieldTypeLabel(field.field_type)}</span>
-                      </div>
-                      <label className="switch">
-                        <input
-                          type="checkbox"
-                          checked={field.include_in_output}
-                          onChange={(event) => updateField(index, { include_in_output: event.target.checked })}
-                        />
-                        <span />
-                      </label>
-                    </div>
-                    <div className="recommendation-box">
-                      <div className="recommendation-head">
-                        <span className="tag">Рекомендации</span>
-                        <button className="link-button" onClick={() => applyRecommendedFieldSettings(index)}>
-                          применить
-                        </button>
-                      </div>
-                      {recommendationFor(
-                        field,
-                        preview?.columns.find((column) => column.normalized_name === field.key),
-                        profile.find((item) => item.key === field.key),
-                      ).map((note) => (
-                        <p key={note}>{note}</p>
-                      ))}
-                    </div>
-                    {field.field_type === "numeric" ? (
-                      <MiniDistribution
-                        column={preview?.columns.find((column) => column.normalized_name === field.key)}
-                        fieldProfile={profile.find((item) => item.key === field.key)}
-                      />
-                    ) : profile.find((item) => item.key === field.key)?.top_categories.length ? (
-                      <div className="category-values">
-                        {profile.find((item) => item.key === field.key)?.top_categories.slice(0, 8).map((point) => (
-                          <span key={point.label}>{point.label} · {point.value}</span>
-                        ))}
-                      </div>
-                    ) : null}
-                    <div className="control-grid">
-                      <label>
-                        Тип поля
-                        <select
-                          value={field.field_type}
-                          onChange={(event) => updateField(index, { field_type: event.target.value as FieldConfig["field_type"] })}
-                        >
-                          <option value="numeric">{fieldTypeLabel("numeric")}</option>
-                          <option value="categorical">{fieldTypeLabel("categorical")}</option>
-                          <option value="binary">{fieldTypeLabel("binary")}</option>
-                          <option value="text">{fieldTypeLabel("text")}</option>
-                        </select>
-                      </label>
-                      <label>
-                        Пропуски
-                        <select value={field.missing_strategy} onChange={(event) => updateField(index, { missing_strategy: event.target.value })}>
-                          <option value="none">{methodLabel("none")}</option>
-                          <option value="median">{methodLabel("median")}</option>
-                          <option value="mean">{methodLabel("mean")}</option>
-                          <option value="mode">{methodLabel("mode")}</option>
-                          <option value="drop_row">{methodLabel("drop_row")}</option>
-                          <option value="constant">{methodLabel("constant")}</option>
-                        </select>
-                      </label>
-                      <label>
-                        Выбросы
-                        <select value={field.outlier_method} onChange={(event) => updateField(index, { outlier_method: event.target.value })}>
-                          <option value="none">{methodLabel("none")}</option>
-                          <option value="iqr_clip">{methodLabel("iqr_clip")}</option>
-                          <option value="iqr_remove">{methodLabel("iqr_remove")}</option>
-                          <option value="zscore_clip">{methodLabel("zscore_clip")}</option>
-                          <option value="zscore_remove">{methodLabel("zscore_remove")}</option>
-                        </select>
-                      </label>
-                      <label>
-                        Нормализация
-                        <select value={field.normalization} onChange={(event) => updateField(index, { normalization: event.target.value })}>
-                          <option value="none">{methodLabel("none")}</option>
-                          <option value="minmax">{methodLabel("minmax")}</option>
-                          <option value="zscore">{methodLabel("zscore")}</option>
-                          <option value="robust">{methodLabel("robust")}</option>
-                          <option value="log_minmax">{methodLabel("log_minmax")}</option>
-                        </select>
-                      </label>
-                    </div>
-                    </article>
+                <div className="prep-tabs">
+                  {prepSections.map((section) => (
+                    <button
+                      key={section.id}
+                      className={`prep-tab ${preprocessingSection === section.id ? "active" : ""}`}
+                      onClick={() => setPreprocessingSection(section.id)}
+                    >
+                      <strong>{section.title}</strong>
+                      <span>{section.caption}</span>
+                    </button>
                   ))}
                 </div>
+                {preprocessingSection === "types" ? (
+                  <>
+                    <div className="prep-section-head">
+                      <p>Измените типы и нажмите «Применить», чтобы обновить индекс качества, таблицы и графики.</p>
+                      <button onClick={() => applyPreprocessingSection("types")} disabled={loading || !datasetFileId}>
+                        {applyingSection === "types" ? "Применяем..." : "Применить"}
+                      </button>
+                    </div>
+                    <div className="table-wrap compact">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>Колонка</th>
+                            <th>Примеры</th>
+                            <th>Тип данных</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {fields.map((field, index) => {
+                            const column = preview?.columns.find((item) => item.normalized_name === field.key);
+                            return (
+                              <tr key={field.key}>
+                                <td>{field.key}</td>
+                                <td>{column?.sample_values.slice(0, 3).map(String).join(", ") || "-"}</td>
+                                <td>
+                                  <select
+                                    value={field.field_type}
+                                    onChange={(event) => updateField(index, { field_type: event.target.value as FieldConfig["field_type"] })}
+                                  >
+                                    <option value="numeric">{fieldTypeLabel("numeric")}</option>
+                                    <option value="categorical">{fieldTypeLabel("categorical")}</option>
+                                    <option value="binary">{fieldTypeLabel("binary")}</option>
+                                    <option value="text">{fieldTypeLabel("text")}</option>
+                                    <option value="datetime">{fieldTypeLabel("datetime")}</option>
+                                  </select>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                ) : null}
+
+                {preprocessingSection === "missing" ? (
+                  <>
+                    <div className="prep-section-head">
+                      <p>Выберите стратегии обработки пропусков и нажмите «Применить» для обновления данных.</p>
+                      <button onClick={() => applyPreprocessingSection("missing")} disabled={loading || !datasetFileId}>
+                        {applyingSection === "missing" ? "Применяем..." : "Применить"}
+                      </button>
+                    </div>
+                    <div className="table-wrap dataset-table wide">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>ID</th>
+                            {preview?.columns.map((column) => (
+                              <th key={`missing-head-${column.normalized_name}`}>{column.normalized_name}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {missingRowsPreview.map((row) => {
+                            return (
+                              <tr key={row.id}>
+                                <td>{row.id}</td>
+                                {preview?.columns.map((column) => {
+                                  const value = row.values[column.normalized_name];
+                                  const isMissing = value === null || value === undefined || value === "";
+                                  return (
+                                    <td key={`${row.id}-${column.normalized_name}`}>
+                                      {isMissing ? <span className="muted-cell">пусто</span> : formatPreviewCell(value)}
+                                    </td>
+                                  );
+                                })}
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                    {!missingRowsPreview.length ? <p className="muted-note">Строк с пропусками в текущем предпросмотре нет.</p> : null}
+
+                    <div className="field-board">
+                      {fields
+                        .filter((field) => (preview?.columns.find((column) => column.normalized_name === field.key)?.missing_count ?? 0) > 0)
+                        .map((field) => {
+                          const index = fields.findIndex((item) => item.key === field.key);
+                          const missingCount = preview?.columns.find((column) => column.normalized_name === field.key)?.missing_count ?? 0;
+                          return (
+                            <article className="field-card" key={field.key}>
+                              <div className="field-card-head">
+                                <div>
+                                  <strong>{field.key}</strong>
+                                  <span>{missingCount} пропусков</span>
+                                </div>
+                              </div>
+                              <div className="control-grid">
+                                <label>
+                                  Что делать с пропусками
+                                  <select value={field.missing_strategy} onChange={(event) => updateField(index, { missing_strategy: event.target.value })}>
+                                    <option value="none">{methodLabel("none")}</option>
+                                    <option value="drop_row">{methodLabel("drop_row")}</option>
+                                    {field.field_type === "numeric" ? <option value="median">{methodLabel("median")}</option> : null}
+                                    {field.field_type === "numeric" ? <option value="mean">{methodLabel("mean")}</option> : null}
+                                    <option value="mode">{methodLabel("mode")}</option>
+                                    <option value="constant">{methodLabel("constant")}</option>
+                                  </select>
+                                </label>
+                                {field.missing_strategy === "constant" ? (
+                                  <label>
+                                    Подставляемое значение
+                                    <input
+                                      value={String(field.missing_constant ?? "")}
+                                      onChange={(event) => updateField(index, { missing_constant: event.target.value })}
+                                      placeholder="например 0 или unknown"
+                                    />
+                                  </label>
+                                ) : null}
+                              </div>
+                            </article>
+                          );
+                        })}
+                    </div>
+                  </>
+                ) : null}
+
+                {preprocessingSection === "outliers" ? (
+                  <>
+                    <div className="prep-section-head">
+                      <p>Настройте обработку выбросов и примените, чтобы пересчитать графики и итоговый профиль.</p>
+                      <button onClick={() => applyPreprocessingSection("outliers")} disabled={loading || !datasetFileId}>
+                        {applyingSection === "outliers" ? "Применяем..." : "Применить"}
+                      </button>
+                    </div>
+                    <div className="field-board">
+                      {fields
+                        .filter((field) => field.field_type === "numeric")
+                        .filter((field) => outlierRowsForField(preview, field.key).length > 0)
+                        .map((field) => {
+                          const index = fields.findIndex((item) => item.key === field.key);
+                          const outliers = outlierRowsForField(preview, field.key);
+                          return (
+                            <article className="field-card" key={field.key}>
+                              <div className="field-card-head">
+                                <div>
+                                  <strong>{field.key}</strong>
+                                  <span>Найдено выбросов: {outliers.length}</span>
+                                </div>
+                              </div>
+                              <DistributionChart
+                                title={`Распределение ${field.key}`}
+                                column={preview?.columns.find((column) => column.normalized_name === field.key)}
+                                fieldProfile={profile.find((item) => item.key === field.key)}
+                                rawValues={(preview?.normalized_dataset?.rows ?? [])
+                                  .map((row) => Number(String(row.values[field.key] ?? "").replace(",", ".")))
+                                  .filter((value) => Number.isFinite(value))}
+                              />
+                              <div className="outlier-row-list">
+                                {outliers.slice(0, 10).map((item) => (
+                                  <span key={`${field.key}-${item.id}`}>id {item.id}: {item.value}</span>
+                                ))}
+                              </div>
+                              <div className="control-grid">
+                                <label>
+                                  Что делать с выбросами
+                                  <select value={field.outlier_method} onChange={(event) => updateField(index, { outlier_method: event.target.value })}>
+                                    <option value="none">{methodLabel("none")}</option>
+                                    <option value="iqr_clip">{methodLabel("iqr_clip")}</option>
+                                    <option value="iqr_remove">{methodLabel("iqr_remove")}</option>
+                                    <option value="zscore_clip">{methodLabel("zscore_clip")}</option>
+                                    <option value="zscore_remove">{methodLabel("zscore_remove")}</option>
+                                  </select>
+                                </label>
+                                <label>
+                                  Порог
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    step="0.1"
+                                    value={field.outlier_threshold}
+                                    onChange={(event) => updateField(index, { outlier_threshold: Number(event.target.value) || 1.5 })}
+                                  />
+                                </label>
+                              </div>
+                            </article>
+                          );
+                        })}
+                      {!fields.filter((field) => field.field_type === "numeric").some((field) => outlierRowsForField(preview, field.key).length > 0) ? (
+                        <p className="muted-note">В текущем предпросмотре не найдено выраженных выбросов по числовым колонкам.</p>
+                      ) : null}
+                    </div>
+                  </>
+                ) : null}
               </>
             ) : (
               <div className="empty-state">Сначала загрузите файл на этапе «Данные».</div>
@@ -1530,94 +2093,68 @@ export function App() {
             <div className="panel-head">
               <div>
                 <span className="section-kicker">Этап 3</span>
-                <h2>Целевой объект и критерии</h2>
-                <p>Выберите объект, для которого нужно найти аналоги, затем задайте критерии близости и их веса.</p>
+                <h2>Режим и веса критериев</h2>
+                <p>Сверху оставлены только ключевые настройки: режим, целевой объект и веса критериев.</p>
               </div>
-              <div className="criteria-actions">
-                <div className="weight-meter">
-                  <span>Σ весов</span>
-                  <strong>{totalWeight.toFixed(3)}</strong>
-                </div>
-                <button className="ghost-button" onClick={applyRecommendedWeights} disabled={!Object.keys(recommendedWeights).length}>
-                  Рекомендовать веса
-                </button>
-                <button onClick={normalizeWeights} disabled={criteria.length === 0 || totalWeight <= 0}>
-                  Нормализовать веса
-                </button>
-              </div>
-            </div>
-
-            {criteria.length > 0 ? (
-              <>
-                <div className="project-panel">
-                  <label>
-                    Проект
-                    <select
-                      value={activeProjectId ?? ""}
-                      onChange={(event) => setActiveProjectId(event.target.value ? Number(event.target.value) : null)}
-                      disabled={!user}
-                    >
-                      <option value="">Без проекта</option>
-                      {projects.map((project) => (
-                        <option key={project.id} value={project.id}>
-                          {project.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    Название сценария
-                    <input value={scenarioTitle} onChange={(event) => setScenarioTitle(event.target.value)} />
-                  </label>
-                  <label>
-                    Новый проект
-                    <input value={newProjectName} onChange={(event) => setNewProjectName(event.target.value)} disabled={!user} />
-                  </label>
-                  <button className="ghost-button" onClick={handleCreateProject} disabled={!user || loading}>
-                    Создать проект
+              {criteria.length > 0 ? (
+                <div className="criteria-actions">
+                  <div className="weight-meter">
+                    <span>Σ весов</span>
+                    <strong>{totalWeight.toFixed(3)}</strong>
+                  </div>
+                  <button className="ghost-button" onClick={setEqualWeights} disabled={criteria.length === 0}>
+                    Поставить одинаковые веса
+                  </button>
+                  <button className="ghost-button" onClick={applyRecommendedWeights} disabled={!Object.keys(recommendedWeights).length}>
+                    Рекомендованные веса
+                  </button>
+                  <button onClick={normalizeWeights} disabled={criteria.length === 0 || totalWeight <= 0}>
+                    Нормализовать веса
                   </button>
                 </div>
-                <div className="target-panel">
-                  <label>
-                    Режим анализа
-                    <select value={analysisMode} onChange={(event) => setAnalysisMode(event.target.value as AnalysisMode)}>
-                      <option value="analog_search">Поиск аналогов для целевого объекта</option>
-                      <option value="rating">Общий рейтинг объектов</option>
-                    </select>
-                  </label>
-                  <label>
-                    Целевой объект
-                    <select
-                      value={targetRowId}
-                      onChange={(event) => setTargetRowId(event.target.value)}
-                      disabled={analysisMode !== "analog_search"}
-                    >
-                      {(preview?.normalized_dataset?.rows ?? []).map((row) => {
-                        const label = String(row.values.name ?? row.values.title ?? row.values.object_name ?? `Объект ${row.id}`);
-                        return <option key={row.id} value={row.id}>{row.id} · {label}</option>;
-                      })}
-                    </select>
-                  </label>
-                  <div className="target-explain">
-                    {analysisMode === "analog_search"
-                      ? "Система сравнит остальные объекты с выбранным целевым объектом по нормализованным критериям и отсортирует аналоги по близости."
-                      : "Система построит общий рейтинг по направлению критериев: больше/меньше/целевое значение."}
-                  </div>
-                </div>
-                {weightNotes.length > 0 ? (
-                  <div className="weight-notes">
-                    {weightNotes.map((note) => (
-                      <p key={note}>{note}</p>
-                    ))}
-                  </div>
-                ) : null}
-                <div className="criteria-board">
-                  {criteria.map((criterion, index) => (
-                    <article className="criterion-card" key={criterion.key}>
+              ) : null}
+            </div>
+
+            <div className="target-panel focus-target-panel">
+              <label>
+                Режим анализа
+                <select value={analysisMode} onChange={(event) => setAnalysisMode(event.target.value as AnalysisMode)}>
+                  <option value="analog_search">Поиск аналогов для целевого объекта</option>
+                  <option value="rating">Общий рейтинг объектов</option>
+                </select>
+              </label>
+              {analysisMode === "analog_search" ? (
+                <label>
+                  Целевой объект
+                  <select value={targetRowId} onChange={(event) => setTargetRowId(event.target.value)}>
+                    {(preview?.normalized_dataset?.rows ?? []).map((row) => {
+                      const label = String(row.values.name ?? row.values.title ?? row.values.object_name ?? `Объект ${row.id}`);
+                      return <option key={row.id} value={row.id}>{row.id} · {label}</option>;
+                    })}
+                  </select>
+                </label>
+              ) : (
+                <div className="target-explain">В режиме общего рейтинга целевой объект не требуется.</div>
+              )}
+              <div className="target-explain">
+                {analysisMode === "analog_search"
+                  ? "Система сравнит все объекты с выбранным целевым объектом и покажет ближайшие аналоги."
+                  : "Система построит общий рейтинг объектов по текущим критериям."}
+              </div>
+            </div>
+            {weightNotes.length > 0 ? (
+              <div className="weight-notes">
+                {weightNotes.map((note) => (
+                  <p key={note}>{note}</p>
+                ))}
+              </div>
+            ) : null}
+            {criteria.length > 0 ? (
+              <div className="criteria-board">
+                {criteria.map((criterion, index) => (
+                  <article className="criterion-card" key={criterion.key}>
                     <div className="criterion-main">
-                      <span className="tag">{criterion.type}</span>
-                      <h3>{criterion.name}</h3>
-                      <p>{criterion.key}</p>
+                      <h3>{criterion.key.toUpperCase()}</h3>
                     </div>
                     <div className="slider-block">
                       <input
@@ -1647,17 +2184,11 @@ export function App() {
                         <option value="target">Ближе к цели</option>
                       </select>
                     </label>
-                      {recommendedWeights[criterion.key] !== undefined ? (
-                        <div className="recommended-weight">
-                          Рекомендация системы: <strong>{recommendedWeights[criterion.key].toFixed(4)}</strong>
-                        </div>
-                      ) : null}
-                    </article>
-                  ))}
-                </div>
-              </>
+                  </article>
+                ))}
+              </div>
             ) : (
-              <div className="empty-state">Сформируйте критерии после настройки подготовки данных.</div>
+              <p className="muted-note">Критерии пока не сформированы. Вернитесь на этап 2 и нажмите «Сформировать критерии».</p>
             )}
           </section>
         ) : null}
@@ -1679,6 +2210,7 @@ export function App() {
                   <button className="ghost-button" onClick={() => setReportPreviewOpen(true)} disabled={!result}>Предпросмотр</button>
                   <button className="ghost-button" onClick={exportJsonReport} disabled={!result}>JSON</button>
                   <button className="ghost-button" onClick={exportHtmlReport} disabled={!result}>HTML</button>
+                  <button className="ghost-button" onClick={exportPdfReport} disabled={!result || loading}>PDF</button>
                   <button onClick={exportDocxReport} disabled={!result || loading}>DOCX</button>
                 </div>
               </div>
@@ -1721,6 +2253,14 @@ export function App() {
                       <span className="section-kicker">Надежность</span>
                       <h3>Доверие и устойчивость</h3>
                       <p>{translateAnalysisText(result.analysis_summary.ranking_stability_note ?? "Нет данных об устойчивости рейтинга.")}</p>
+                      {summaryList<RankingStabilityScenario>(result.analysis_summary, "ranking_stability_scenarios").map((scenario) => (
+                        <div className="stability-row" key={scenario.label}>
+                          <strong>{scenario.label}</strong>
+                          <span>Лидер: {scenario.top_object_id ?? "-"}</span>
+                          <span>Совпадение топ-N: {scenario.top_n_overlap}</span>
+                          <small>{translateAnalysisText(scenario.note)}</small>
+                        </div>
+                      ))}
                       {summaryList<string>(result.analysis_summary, "confidence_notes").map((item, index) => (
                         <p key={`${item}-${index}`}>{translateAnalysisText(item)}</p>
                       ))}

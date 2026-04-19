@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from copy import deepcopy
+from datetime import datetime
 from statistics import median
 from typing import Any
 
@@ -29,6 +30,35 @@ def _to_float(value: Any) -> float | None:
             return float(value)
     except ValueError:
         return None
+    return None
+
+
+def _to_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    normalized = text.replace("Z", "+00:00")
+    formats = (
+        None,
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+        "%d.%m.%Y",
+        "%d-%m-%Y",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y/%m/%d %H:%M:%S",
+        "%d.%m.%Y %H:%M:%S",
+    )
+    for fmt in formats:
+        try:
+            if fmt is None:
+                return datetime.fromisoformat(normalized)
+            return datetime.strptime(normalized, fmt)
+        except ValueError:
+            continue
     return None
 
 
@@ -227,6 +257,37 @@ def _encode_rows(rows: list[dict], config: FieldConfig, report: FieldReport) -> 
     return rows, generated_columns
 
 
+def _derive_datetime_features(rows: list[dict], config: FieldConfig, report: FieldReport) -> tuple[list[dict], list[str]]:
+    generated_columns: list[str] = []
+    if config.field_type != "datetime":
+        return rows, generated_columns
+
+    derived_map = {
+        f"{config.key}__year": lambda dt: float(dt.year),
+        f"{config.key}__month": lambda dt: float(dt.month),
+        f"{config.key}__day": lambda dt: float(dt.day),
+        f"{config.key}__day_of_week": lambda dt: float(dt.weekday()),
+    }
+    generated_columns = list(derived_map)
+    success_count = 0
+
+    for row in rows:
+        parsed = _to_datetime(row["values"].get(config.key))
+        if parsed is None:
+            for column in generated_columns:
+                row["values"][column] = None
+            continue
+        success_count += 1
+        for column, extractor in derived_map.items():
+            row["values"][column] = extractor(parsed)
+
+    if success_count:
+        report.notes.append("Datetime features generated: year, month, day, day_of_week")
+    else:
+        report.notes.append("Datetime feature generation skipped: no parseable values")
+    return rows, generated_columns
+
+
 def _normalize_rows(rows: list[dict], config: FieldConfig, report: FieldReport) -> list[dict]:
     if config.normalization == "none" or config.field_type != "numeric":
         return rows
@@ -294,6 +355,7 @@ def preprocess_dataset(payload: PreprocessingRequest) -> PreprocessingResponse:
 
         rows, removed_missing = _fill_missing(rows, config, report)
         rows, removed_outliers, clipped = _handle_outliers(rows, config, report)
+        rows, datetime_columns = _derive_datetime_features(rows, config, report)
         rows, new_columns = _encode_rows(rows, config, report)
         rows = _normalize_rows(rows, config, report)
 
@@ -303,6 +365,7 @@ def preprocess_dataset(payload: PreprocessingRequest) -> PreprocessingResponse:
         total_removed_missing += removed_missing
         total_removed_outliers += removed_outliers
         total_clipped += clipped
+        generated_columns.extend(datetime_columns)
         generated_columns.extend(new_columns)
         field_reports.append(report)
 

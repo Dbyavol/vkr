@@ -1,5 +1,6 @@
 import type {
   AdminStats,
+  AnalysisFilters,
   AnalysisMode,
   AuthResponse,
   AuthUser,
@@ -7,6 +8,7 @@ import type {
   CriterionConfig,
   PipelineProfileResponse,
   FieldConfig,
+  PreprocessingRefreshResponse,
   PipelineResult,
   PreviewResponse,
   ProjectItem,
@@ -121,6 +123,9 @@ export async function runPipeline(
   parentHistoryId?: number | null,
   datasetFileId?: number | null,
   filename?: string,
+  filterCriteria?: AnalysisFilters,
+  includeStabilityScenarios = false,
+  stabilityVariationPct = 10,
 ): Promise<PipelineResult> {
   const config = {
     fields,
@@ -128,6 +133,9 @@ export async function runPipeline(
     target_row_id: targetRowId || null,
     analysis_mode: analysisMode,
     top_n: 10,
+    filter_criteria: filterCriteria ?? null,
+    include_stability_scenarios: includeStabilityScenarios,
+    stability_variation_pct: stabilityVariationPct,
     project_id: projectId ?? null,
     scenario_title: scenarioTitle || null,
     parent_history_id: parentHistoryId ?? null,
@@ -170,6 +178,28 @@ export async function runPipeline(
 
   if (!response.ok) {
     throw new Error(await readError(response, "Не удалось выполнить расчет"));
+  }
+
+  return response.json();
+}
+
+export async function refreshPreprocessing(
+  datasetFileId: number,
+  fields: FieldConfig[],
+  filename?: string,
+): Promise<PreprocessingRefreshResponse> {
+  const response = await fetch(`${ORCHESTRATOR_URL}/pipeline/preprocess-refresh`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      dataset_file_id: datasetFileId,
+      filename: filename || null,
+      fields,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(await readError(response, "Не удалось применить настройки предобработки"));
   }
 
   return response.json();
@@ -292,4 +322,30 @@ export async function downloadDocxReport(result: PipelineResult, criteria: Crite
   link.download = "comparison-report.docx";
   link.click();
   URL.revokeObjectURL(url);
+}
+
+export async function uploadReportFile(fileName: string, blob: Blob): Promise<number> {
+  const form = new FormData();
+  form.append("file", blob, fileName);
+
+  const response = await fetch(`${STORAGE_URL}/files/upload?purpose=comparison-report`, {
+    method: "POST",
+    body: form,
+  });
+  if (!response.ok) {
+    throw new Error(await readError(response, "Не удалось сохранить отчет в хранилище"));
+  }
+  const data = await response.json();
+  return Number(data.id);
+}
+
+export async function bindReportToHistory(historyId: number, resultFileId: number): Promise<void> {
+  const response = await fetch(`${STORAGE_URL}/comparison-history/${historyId}/result-file`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ result_file_id: resultFileId }),
+  });
+  if (!response.ok) {
+    throw new Error(await readError(response, "Не удалось привязать отчет к истории"));
+  }
 }

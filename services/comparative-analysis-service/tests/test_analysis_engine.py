@@ -116,3 +116,61 @@ def test_analysis_parses_numeric_strings_from_imported_csv() -> None:
         for contribution in row.contributions
         if contribution.note
     }
+
+
+def test_analysis_applies_server_side_numeric_filters() -> None:
+    payload = AnalysisRequest.model_validate(
+        {
+            "mode": "analog_search",
+            "target_object_id": "target",
+            "dataset": {
+                "objects": [
+                    {"id": "target", "title": "Target", "attributes": {"price": 100, "area": 50}},
+                    {"id": "a", "title": "A", "attributes": {"price": 103, "area": 52}},
+                    {"id": "b", "title": "B", "attributes": {"price": 240, "area": 90}},
+                ]
+            },
+            "criteria": [
+                {"key": "price", "name": "Price", "weight": 0.5, "type": "numeric", "direction": "minimize"},
+                {"key": "area", "name": "Area", "weight": 0.5, "type": "numeric", "direction": "maximize"},
+            ],
+            "filter_criteria": {
+                "numeric_ranges": [
+                    {"key": "price", "max_value": 150},
+                ]
+            },
+        }
+    )
+
+    result = run_comparative_analysis(payload)
+
+    assert len(result.ranking) == 1
+    assert result.ranking[0].object_id == "a"
+    assert any("Фильтры сократили набор объектов" in note for note in result.summary.normalization_notes)
+
+
+def test_analysis_returns_stability_scenarios() -> None:
+    payload = AnalysisRequest.model_validate(
+        {
+            "dataset": {
+                "objects": [
+                    {"id": "o1", "title": "One", "attributes": {"price": 100, "area": 50, "floor": 5}},
+                    {"id": "o2", "title": "Two", "attributes": {"price": 120, "area": 62, "floor": 3}},
+                    {"id": "o3", "title": "Three", "attributes": {"price": 95, "area": 47, "floor": 9}},
+                ]
+            },
+            "criteria": [
+                {"key": "price", "name": "Price", "weight": 0.45, "type": "numeric", "direction": "minimize"},
+                {"key": "area", "name": "Area", "weight": 0.35, "type": "numeric", "direction": "maximize"},
+                {"key": "floor", "name": "Floor", "weight": 0.2, "type": "numeric", "direction": "maximize"},
+            ],
+            "include_stability_scenarios": True,
+            "stability_variation_pct": 10,
+            "top_n": 3,
+        }
+    )
+
+    result = run_comparative_analysis(payload)
+
+    assert len(result.summary.ranking_stability_scenarios) == 3
+    assert {scenario.label for scenario in result.summary.ranking_stability_scenarios} == {"-10%", "Базовый", "+10%"}

@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.schemas.files import (
     ComparisonHistoryCreate,
+    ComparisonHistoryResultFileUpdate,
     ComparisonHistoryRead,
     DatasetCreate,
     DatasetRead,
@@ -27,6 +28,7 @@ from app.services.file_service import (
     list_comparison_history,
     list_projects,
     storage_stats,
+    update_comparison_history_result_file,
 )
 
 router = APIRouter(tags=["files"])
@@ -133,6 +135,22 @@ def read_comparison_history(
 @router.get("/comparison-history/{history_id}", response_model=ComparisonHistoryRead)
 def read_comparison_history_item(history_id: int, db: Session = Depends(get_db)) -> ComparisonHistoryRead:
     item = get_comparison_history(db, history_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Comparison history item not found")
+    return item
+
+
+@router.patch("/comparison-history/{history_id}/result-file", response_model=ComparisonHistoryRead)
+def update_comparison_history_result_file_endpoint(
+    history_id: int,
+    payload: ComparisonHistoryResultFileUpdate,
+    db: Session = Depends(get_db),
+) -> ComparisonHistoryRead:
+    item = update_comparison_history_result_file(
+        db,
+        history_id=history_id,
+        result_file_id=payload.result_file_id,
+    )
     if item is None:
         raise HTTPException(status_code=404, detail="Comparison history item not found")
     return item

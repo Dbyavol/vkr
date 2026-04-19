@@ -5,14 +5,18 @@ from typing import Any
 
 from app.schemas.analysis import (
     AnalogGroup,
+    AnalysisFilters,
     AnalysisRequest,
     AnalysisResponse,
     AnalysisSummary,
+    CategoricalAllowlistFilter,
     CriterionConfig,
     CriterionContribution,
     CriterionSensitivity,
     DominancePair,
+    NumericRangeFilter,
     RankedObject,
+    RankingStabilityScenario,
 )
 
 
@@ -157,6 +161,198 @@ def _ranking_stability_note(rows: list[RankedObject]) -> str:
     return f"Рейтинг чувствителен: отрыв лидера составляет только {margin:.4f}."
 
 
+def _passes_numeric_filter(attributes: dict[str, Any], filter_config: NumericRangeFilter) -> bool:
+    numeric_value = _to_float(attributes.get(filter_config.key))
+    if numeric_value is None:
+        return False
+    if filter_config.min_value is not None and numeric_value < filter_config.min_value:
+        return False
+    if filter_config.max_value is not None and numeric_value > filter_config.max_value:
+        return False
+    return True
+
+
+def _passes_categorical_filter(attributes: dict[str, Any], filter_config: CategoricalAllowlistFilter) -> bool:
+    value = attributes.get(filter_config.key)
+    if value is None:
+        return False
+    allowed = {item for item in filter_config.values}
+    return str(value) in allowed
+
+
+def _apply_filters(payload: AnalysisRequest) -> list[Any]:
+    filters: AnalysisFilters | None = payload.filter_criteria
+    if not filters:
+        return list(payload.dataset.objects)
+
+    filtered = []
+    for obj in payload.dataset.objects:
+        if not all(_passes_numeric_filter(obj.attributes, item) for item in filters.numeric_ranges):
+            continue
+        if not all(_passes_categorical_filter(obj.attributes, item) for item in filters.categorical_allowlist):
+            continue
+        filtered.append(obj)
+
+    # Keep target in analog mode as a reference point for similarity, even if filters exclude it.
+    if payload.mode == "analog_search" and payload.target_object_id:
+        if all(item.id != payload.target_object_id for item in filtered):
+            target = next((item for item in payload.dataset.objects if item.id == payload.target_object_id), None)
+            if target is not None:
+                filtered.append(target)
+    return filtered
+
+
+def _build_ranked_rows(
+    *,
+    objects: list[Any],
+    criteria_by_key: dict[str, CriterionConfig],
+    normalized_weights: dict[str, float],
+    target_object_id: str | None,
+    mode: str,
+    dataset_values: dict[str, list[Any]],
+) -> list[RankedObject]:
+    rows: list[RankedObject] = []
+    target_contributions: dict[str, float] | None = None
+
+    for obj in objects:
+        contributions: list[CriterionContribution] = []
+        score = 0.0
+        for key, criterion in criteria_by_key.items():
+            raw_value = obj.attributes.get(key)
+            normalized = _normalize_value(raw_value, criterion, dataset_values[key])
+            weight = normalized_weights[key]
+            contribution = normalized.value * weight
+            score += contribution
+            contributions.append(
+                CriterionContribution(
+                    key=key,
+                    name=criterion.name,
+                    raw_value=raw_value,
+                    normalized_value=round(normalized.value, 4),
+                    weight=round(weight, 4),
+                    contribution=round(contribution, 4),
+                    note=normalized.note,
+                )
+            )
+        if target_object_id and obj.id == target_object_id:
+            target_contributions = {item.key: item.normalized_value for item in contributions}
+        top_positive = sorted(contributions, key=lambda item: item.contribution, reverse=True)[:3]
+        top_negative = sorted(contributions, key=lambda item: item.contribution)[:2]
+        explanation = (
+            f"Сильнее всего оценку повысили: {', '.join(item.name for item in top_positive) or 'нет данных'}. "
+            f"Слабее всего повлияли: {', '.join(item.name for item in top_negative) or 'нет данных'}."
+        )
+        rows.append(
+            RankedObject(
+                object_id=obj.id,
+                title=obj.title,
+                rank=0,
+                score=round(score, 4),
+                contributions=contributions,
+                similarity_to_target=None,
+                explanation=explanation,
+            )
+        )
+
+    for row in rows:
+        row.similarity_to_target = _weighted_target_similarity(row.contributions, target_contributions)
+        if mode == "analog_search" and row.similarity_to_target is not None:
+            row.score = row.similarity_to_target
+            row.explanation = (
+                f"Сходство с целевым объектом: {row.similarity_to_target:.4f}. "
+                f"Расчет выполнен по взвешенной близости нормализованных критериев."
+            )
+
+    if mode == "analog_search" and target_object_id:
+        rows = [row for row in rows if row.object_id != target_object_id]
+
+    rows.sort(
+        key=lambda item: (
+            item.similarity_to_target if item.similarity_to_target is not None else -1,
+            item.score,
+        ),
+        reverse=True,
+    )
+    for index, row in enumerate(rows, start=1):
+        row.rank = index
+    return rows
+
+
+def _scenario_weights(criteria: list[CriterionConfig], variation_pct: float, direction: int) -> dict[str, float]:
+    if not criteria:
+        return {}
+    variation = variation_pct / 100.0
+    adjusted: dict[str, float] = {}
+    for index, criterion in enumerate(criteria):
+        even_index = index % 2 == 0
+        if direction == 0:
+            factor = 1.0
+        elif direction < 0:
+            factor = (1.0 - variation) if even_index else (1.0 + variation)
+        else:
+            factor = (1.0 + variation) if even_index else (1.0 - variation)
+        adjusted[criterion.key] = max(0.0001, criterion.weight * factor)
+    total = sum(adjusted.values()) or 1.0
+    return {key: value / total for key, value in adjusted.items()}
+
+
+def _build_stability_scenarios(
+    *,
+    payload: AnalysisRequest,
+    objects: list[Any],
+    criteria_by_key: dict[str, CriterionConfig],
+    baseline_rows: list[RankedObject],
+    dataset_values: dict[str, list[Any]],
+) -> list[RankingStabilityScenario]:
+    if not payload.include_stability_scenarios or not baseline_rows:
+        return []
+
+    baseline_top_ids = [row.object_id for row in baseline_rows[: payload.top_n]]
+    baseline_positions = {row.object_id: row.rank for row in baseline_rows}
+    scenarios: list[tuple[str, int]] = [("-10%", -1), ("Базовый", 0), ("+10%", 1)]
+    result: list[RankingStabilityScenario] = []
+
+    for label, direction in scenarios:
+        scenario_weights = _scenario_weights(payload.criteria, payload.stability_variation_pct, direction)
+        scenario_rows = _build_ranked_rows(
+            objects=objects,
+            criteria_by_key=criteria_by_key,
+            normalized_weights=scenario_weights,
+            target_object_id=payload.target_object_id,
+            mode=payload.mode,
+            dataset_values=dataset_values,
+        )
+        scenario_top_ids = [row.object_id for row in scenario_rows[: payload.top_n]]
+        overlap = len(set(baseline_top_ids) & set(scenario_top_ids))
+        changed_positions = sum(
+            1
+            for obj_id in baseline_top_ids
+            if obj_id in {item.object_id for item in scenario_rows}
+            and baseline_positions.get(obj_id) != next(
+                (item.rank for item in scenario_rows if item.object_id == obj_id),
+                None,
+            )
+        )
+        if changed_positions == 0 and overlap == len(baseline_top_ids):
+            note = "Состав и порядок топ-N стабильны для сценария."
+        elif overlap == 0:
+            note = "Состав топ-N полностью изменился в сценарии."
+        else:
+            note = "Сценарий меняет позиции и/или состав лидеров."
+
+        result.append(
+            RankingStabilityScenario(
+                label=label,
+                variation_pct=payload.stability_variation_pct,
+                top_object_id=scenario_rows[0].object_id if scenario_rows else None,
+                changed_positions=changed_positions,
+                top_n_overlap=overlap,
+                note=note,
+            )
+        )
+    return result
+
+
 def _analog_groups(rows: list[RankedObject]) -> list[AnalogGroup]:
     groups = [
         ("Очень близкие аналоги", 0.85, 1.0),
@@ -239,84 +435,46 @@ def _confidence(rows: list[RankedObject], criteria_count: int) -> tuple[float, l
 
 
 def run_comparative_analysis(payload: AnalysisRequest) -> AnalysisResponse:
+    objects = _apply_filters(payload)
+    if not objects:
+        raise ValueError("После применения фильтров не осталось объектов для анализа")
+
     criteria_by_key = {item.key: item for item in payload.criteria}
     normalized_weights, notes = _weights(payload.criteria, payload.auto_normalize_weights)
 
     dataset_values = {
-        criterion.key: [obj.attributes.get(criterion.key) for obj in payload.dataset.objects]
+        criterion.key: [obj.attributes.get(criterion.key) for obj in objects]
         for criterion in payload.criteria
     }
-
-    rows: list[RankedObject] = []
-    target_contributions: dict[str, float] | None = None
-
-    for obj in payload.dataset.objects:
-        contributions: list[CriterionContribution] = []
-        score = 0.0
-        for key, criterion in criteria_by_key.items():
-            raw_value = obj.attributes.get(key)
-            normalized = _normalize_value(raw_value, criterion, dataset_values[key])
-            weight = normalized_weights[key]
-            contribution = normalized.value * weight
-            score += contribution
-            contributions.append(
-                CriterionContribution(
-                    key=key,
-                    name=criterion.name,
-                    raw_value=raw_value,
-                    normalized_value=round(normalized.value, 4),
-                    weight=round(weight, 4),
-                    contribution=round(contribution, 4),
-                    note=normalized.note,
-                )
-            )
-        if payload.target_object_id and obj.id == payload.target_object_id:
-            target_contributions = {item.key: item.normalized_value for item in contributions}
-        top_positive = sorted(contributions, key=lambda item: item.contribution, reverse=True)[:3]
-        top_negative = sorted(contributions, key=lambda item: item.contribution)[:2]
-        explanation = (
-            f"Сильнее всего оценку повысили: {', '.join(item.name for item in top_positive) or 'нет данных'}. "
-            f"Слабее всего повлияли: {', '.join(item.name for item in top_negative) or 'нет данных'}."
-        )
-        rows.append(
-            RankedObject(
-                object_id=obj.id,
-                title=obj.title,
-                rank=0,
-                score=round(score, 4),
-                contributions=contributions,
-                similarity_to_target=None,
-                explanation=explanation,
-            )
-        )
-
-    for row in rows:
-        row.similarity_to_target = _weighted_target_similarity(row.contributions, target_contributions)
-        if payload.mode == "analog_search" and row.similarity_to_target is not None:
-            row.score = row.similarity_to_target
-            row.explanation = (
-                f"Сходство с целевым объектом: {row.similarity_to_target:.4f}. "
-                f"Расчет выполнен по взвешенной близости нормализованных критериев."
-            )
-
-    if payload.mode == "analog_search" and payload.target_object_id:
-        rows = [row for row in rows if row.object_id != payload.target_object_id]
-
-    rows.sort(
-        key=lambda item: (
-            item.similarity_to_target if item.similarity_to_target is not None else -1,
-            item.score,
-        ),
-        reverse=True,
+    rows = _build_ranked_rows(
+        objects=objects,
+        criteria_by_key=criteria_by_key,
+        normalized_weights=normalized_weights,
+        target_object_id=payload.target_object_id,
+        mode=payload.mode,
+        dataset_values=dataset_values,
     )
-    for index, row in enumerate(rows, start=1):
-        row.rank = index
+
+    if not rows:
+        raise ValueError("После расчета не удалось сформировать рейтинг")
 
     best = rows[0]
     confidence_score, confidence_notes = _confidence(rows, len(payload.criteria))
+    scenarios = _build_stability_scenarios(
+        payload=payload,
+        objects=objects,
+        criteria_by_key=criteria_by_key,
+        baseline_rows=rows,
+        dataset_values=dataset_values,
+    )
+
+    source_objects_count = len(payload.dataset.objects)
+    if len(objects) != source_objects_count:
+        notes.append(f"Фильтры сократили набор объектов: {source_objects_count} -> {len(objects)}")
+
     return AnalysisResponse(
         summary=AnalysisSummary(
-            objects_count=len(payload.dataset.objects),
+            objects_count=len(objects),
             criteria_count=len(payload.criteria),
             weights_sum=round(sum(normalized_weights.values()), 4),
             best_object_id=best.object_id,
@@ -328,6 +486,7 @@ def run_comparative_analysis(payload: AnalysisRequest) -> AnalysisResponse:
             confidence_notes=confidence_notes,
             sensitivity=_criterion_sensitivity(rows, payload.criteria),
             ranking_stability_note=_ranking_stability_note(rows),
+            ranking_stability_scenarios=scenarios,
             analog_groups=_analog_groups(rows) if payload.mode == "analog_search" else [],
             dominance_pairs=_dominance_pairs(rows),
         ),

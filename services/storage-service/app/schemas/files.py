@@ -94,6 +94,10 @@ class ComparisonHistoryRead(ORMModel):
     created_at: datetime
 
 
+class ComparisonHistoryResultFileUpdate(BaseModel):
+    result_file_id: int
+
+
 class StorageStats(BaseModel):
     files_total: int
     datasets_total: int

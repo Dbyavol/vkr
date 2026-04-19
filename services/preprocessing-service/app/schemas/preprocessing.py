@@ -3,7 +3,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 
-FieldType = Literal["numeric", "categorical", "binary", "text"]
+FieldType = Literal["numeric", "categorical", "binary", "text", "datetime"]
 MissingStrategy = Literal["none", "drop_row", "mean", "median", "mode", "constant"]
 OutlierMethod = Literal["none", "iqr_remove", "iqr_clip", "zscore_remove", "zscore_clip"]
 NormalizationMethod = Literal["none", "minmax", "zscore", "robust", "log_minmax"]
@@ -164,3 +164,5 @@ class DatasetProfileResponse(BaseModel):
     quality: DatasetQualityReport
     recommended_weights: dict[str, float] = Field(default_factory=dict)
     weight_notes: list[str] = Field(default_factory=list)
+    missing_matrix_preview: list[dict[str, Any]] = Field(default_factory=list)
+    correlation_matrix: list[dict[str, Any]] = Field(default_factory=list)

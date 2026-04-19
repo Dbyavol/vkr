@@ -201,6 +201,22 @@ def get_comparison_history(db: Session, history_id: int) -> ComparisonHistory | 
     return db.get(ComparisonHistory, history_id)
 
 
+def update_comparison_history_result_file(
+    db: Session,
+    *,
+    history_id: int,
+    result_file_id: int,
+) -> ComparisonHistory | None:
+    item = db.get(ComparisonHistory, history_id)
+    if item is None:
+        return None
+    item.result_file_id = result_file_id
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
 def list_comparison_history(
     db: Session,
     user_id: int | None = None,

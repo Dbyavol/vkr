@@ -205,14 +205,14 @@ const SUMMARY_CARD_KEYS = [
 ];
 
 const DIRECTION_LABELS: Record<string, string> = {
-  maximize: "максимизация",
-  minimize: "минимизация",
-  target: "близость к целевому значению",
+  maximize: "Максимизация",
+  minimize: "Минимизация",
+  target: "Близость к целевому значению",
 };
 
 const MODE_LABELS: Record<string, string> = {
-  rating: "рейтинг объектов",
-  analog_search: "поиск аналогов",
+  rating: "Рейтинг объектов",
+  analog_search: "Поиск аналогов",
 };
 
 const SERVICE_LABELS: Record<string, string> = {
@@ -224,20 +224,20 @@ const SERVICE_LABELS: Record<string, string> = {
 };
 
 const STATUS_LABELS: Record<string, string> = {
-  ok: "работает",
-  error: "ошибка",
-  active: "активен",
-  blocked: "заблокирован",
-  completed: "завершен",
-  warning: "предупреждение",
-  critical: "критично",
-  info: "информация",
+  ok: "Работает",
+  error: "Ошибка",
+  active: "Активен",
+  blocked: "Заблокирован",
+  completed: "Завершен",
+  warning: "Предупреждение",
+  critical: "Критично",
+  info: "Информация",
 };
 
 const QUALITY_TEXT: Record<string, string> = {
-  good: "хорошее",
-  medium: "среднее",
-  poor: "низкое",
+  good: "Хорошее",
+  medium: "Среднее",
+  poor: "Низкое",
   "Ready for analysis": "Готов к анализу",
   "Risky, preprocessing is recommended": "Есть риски, рекомендуется предобработка",
   "Not ready for reliable analysis": "Не готов к надежному анализу",
@@ -248,27 +248,27 @@ const QUALITY_TEXT: Record<string, string> = {
 };
 
 const FIELD_TYPE_LABELS: Record<string, string> = {
-  numeric: "числовой",
-  categorical: "категориальный",
-  binary: "бинарный",
-  text: "текстовый",
+  numeric: "Числовой",
+  categorical: "Категориальный",
+  binary: "Бинарный",
+  text: "Текстовый",
 };
 
 const METHOD_LABELS: Record<string, string> = {
-  none: "не применять",
-  median: "заполнить медианой",
-  mean: "заполнить средним",
-  mode: "заполнить модой",
-  drop_row: "удалить строку",
-  constant: "задать константу",
-  iqr_clip: "ограничить по IQR",
-  iqr_remove: "удалить по IQR",
-  zscore_clip: "ограничить по z-score",
-  zscore_remove: "удалить по z-score",
+  none: "Не применять",
+  median: "Заполнить медианой",
+  mean: "Заполнить средним",
+  mode: "Заполнить модой",
+  drop_row: "Удалить строку",
+  constant: "Задать константу",
+  iqr_clip: "Ограничить по IQR",
+  iqr_remove: "Удалить по IQR",
+  zscore_clip: "Ограничить по z-score",
+  zscore_remove: "Удалить по z-score",
   minmax: "min-max",
   zscore: "z-score",
-  robust: "устойчивая",
-  log_minmax: "логарифм + min-max",
+  robust: "Устойчивая",
+  log_minmax: "Логарифм + min-max",
 };
 
 function translateStatus(value: string) {
@@ -321,11 +321,11 @@ function formatSummaryValue(key: string, value: unknown) {
   if (value === null || value === undefined) return "-";
   if (key === "mode") return formatAnalysisMode(value);
   if (key === "normalization_notes" || key === "confidence_notes") {
-    return Array.isArray(value) && value.length ? value.map(translateAnalysisText).join("; ") : "нет замечаний";
+    return Array.isArray(value) && value.length ? value.map(translateAnalysisText).join("; ") : "Нет замечаний";
   }
   if (Array.isArray(value)) return `${value.length} записей`;
   if (typeof value === "number") return Number.isInteger(value) ? String(value) : value.toFixed(4);
-  if (typeof value === "object") return "см. детальный раздел";
+  if (typeof value === "object") return "См. детальный раздел";
   return translateAnalysisText(value);
 }
 
@@ -501,6 +501,186 @@ function buildHtmlReport(result: PipelineResult, criteria: CriterionConfig[]) {
 </html>`;
 }
 
+type RankedItem = PipelineResult["ranking"][number];
+
+function chartValue(item: RankedItem, mode: AnalysisMode) {
+  if (mode === "analog_search" && item.similarity_to_target !== null && item.similarity_to_target !== undefined) {
+    return item.similarity_to_target;
+  }
+  return item.score;
+}
+
+function compactNumber(value: number) {
+  return Number.isFinite(value) ? value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "") : "0";
+}
+
+function contributionLabel(value: unknown) {
+  const text = String(value ?? "-");
+  return text.length > 18 ? `${text.slice(0, 18)}...` : text;
+}
+
+function ResultBarChart({
+  result,
+  mode,
+  selectedId,
+  onSelect,
+}: {
+  result: PipelineResult;
+  mode: AnalysisMode;
+  selectedId: string;
+  onSelect: (objectId: string) => void;
+}) {
+  const rows = result.ranking.slice(0, 10);
+  const maxValue = Math.max(...rows.map((item) => chartValue(item, mode)), 0.0001);
+  return (
+    <div className="analytics-card wide-chart">
+      <div className="chart-head">
+        <div>
+          <span className="section-kicker">Bar chart</span>
+          <h3>{mode === "analog_search" ? "Близость аналогов" : "Итоговые оценки"}</h3>
+        </div>
+        <small>Нажмите на столбец, чтобы разобрать объект</small>
+      </div>
+      <div className="result-bars">
+        {rows.map((item) => {
+          const value = chartValue(item, mode);
+          const width = Math.max(3, (value / maxValue) * 100);
+          return (
+            <button
+              className={`result-bar ${selectedId === item.object_id ? "active" : ""}`}
+              key={item.object_id}
+              onClick={() => onSelect(item.object_id)}
+              title={`${item.title}: ${compactNumber(value)}`}
+            >
+              <span className="result-bar-rank">#{item.rank}</span>
+              <span className="result-bar-label">{item.title}</span>
+              <span className="result-bar-track">
+                <span style={{ width: `${width}%` }} />
+              </span>
+              <strong>{compactNumber(value)}</strong>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function RadarChart({ baseline, selected }: { baseline?: RankedItem; selected?: RankedItem }) {
+  const source = selected ?? baseline;
+  const contributions = source?.contributions.slice(0, 8) ?? [];
+  const count = contributions.length;
+  const center = 150;
+  const radius = 104;
+  const levels = [0.25, 0.5, 0.75, 1];
+  const angleFor = (index: number) => (Math.PI * 2 * index) / Math.max(count, 1) - Math.PI / 2;
+  const pointFor = (value: number, index: number) => {
+    const angle = angleFor(index);
+    const safeValue = Math.max(0, Math.min(1, value));
+    return {
+      x: center + Math.cos(angle) * radius * safeValue,
+      y: center + Math.sin(angle) * radius * safeValue,
+    };
+  };
+  const polygonFor = (item?: RankedItem) =>
+    item?.contributions
+      .slice(0, count)
+      .map((contribution, index) => {
+        const point = pointFor(contribution.normalized_value, index);
+        return `${point.x},${point.y}`;
+      })
+      .join(" ") ?? "";
+
+  return (
+    <div className="analytics-card radar-card">
+      <div className="chart-head">
+        <div>
+          <span className="section-kicker">Radar chart</span>
+          <h3>Профиль критериев</h3>
+        </div>
+      </div>
+      {count ? (
+        <>
+          <svg className="radar-svg" viewBox="0 0 300 300" role="img" aria-label="Профиль критериев">
+            {levels.map((level) => (
+              <polygon
+                key={level}
+                points={contributions.map((_, index) => {
+                  const point = pointFor(level, index);
+                  return `${point.x},${point.y}`;
+                }).join(" ")}
+                className="radar-grid"
+              />
+            ))}
+            {contributions.map((contribution, index) => {
+              const edge = pointFor(1, index);
+              const label = pointFor(1.18, index);
+              return (
+                <g key={contribution.key}>
+                  <line x1={center} y1={center} x2={edge.x} y2={edge.y} className="radar-axis" />
+                  <text x={label.x} y={label.y} textAnchor="middle" dominantBaseline="middle">
+                    {contributionLabel(contribution.name)}
+                  </text>
+                </g>
+              );
+            })}
+            {baseline && <polygon points={polygonFor(baseline)} className="radar-shape baseline" />}
+            {selected && <polygon points={polygonFor(selected)} className="radar-shape selected" />}
+          </svg>
+          <div className="chart-legend">
+            <span><i className="legend-dot baseline" />Лидер</span>
+            <span><i className="legend-dot selected" />Выбранный объект</span>
+          </div>
+        </>
+      ) : (
+        <p>Нет данных по критериям для построения профиля.</p>
+      )}
+    </div>
+  );
+}
+
+function ContributionWaterfall({ item }: { item?: RankedItem }) {
+  const contributions = item?.contributions ?? [];
+  const total = contributions.reduce((sum, contribution) => sum + Math.max(0, contribution.contribution), 0);
+  let cumulative = 0;
+  return (
+    <div className="analytics-card waterfall-card">
+      <div className="chart-head">
+        <div>
+          <span className="section-kicker">Waterfall</span>
+          <h3>Вклад критериев</h3>
+        </div>
+        {item ? <small>{item.title}</small> : null}
+      </div>
+      {item && contributions.length ? (
+        <div className="waterfall-list">
+          {contributions.map((contribution) => {
+            const value = Math.max(0, contribution.contribution);
+            const left = total > 0 ? (cumulative / total) * 100 : 0;
+            const width = total > 0 ? Math.max(2, (value / total) * 100) : 0;
+            cumulative += value;
+            return (
+              <div className="waterfall-row" key={contribution.key} title={`${contribution.name}: ${compactNumber(value)}`}>
+                <span>{contribution.name}</span>
+                <div className="waterfall-track">
+                  <i style={{ left: `${left}%`, width: `${width}%` }} />
+                </div>
+                <strong>{compactNumber(value)}</strong>
+              </div>
+            );
+          })}
+          <div className="waterfall-total">
+            <span>Итоговая сумма вкладов</span>
+            <strong>{compactNumber(total)}</strong>
+          </div>
+        </div>
+      ) : (
+        <p>Выберите объект на диаграмме рейтинга, чтобы увидеть вклад критериев.</p>
+      )}
+    </div>
+  );
+}
+
 export function App() {
   const savedWorkflow = useMemo(readSavedWorkflow, []);
   const [activeStage, setActiveStage] = useState<StageId>(savedWorkflow.activeStage ?? "data");
@@ -540,6 +720,7 @@ export function App() {
   const [analysisMode, setAnalysisMode] = useState<AnalysisMode>(savedWorkflow.analysisMode ?? "analog_search");
   const [targetRowId, setTargetRowId] = useState(savedWorkflow.targetRowId ?? "");
   const [result, setResult] = useState<PipelineResult | null>(savedWorkflow.result ?? null);
+  const [selectedResultId, setSelectedResultId] = useState(savedWorkflow.result?.ranking?.[0]?.object_id ?? "");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -564,6 +745,10 @@ export function App() {
     .map((id) => history.find((item) => item.id === id))
     .filter((item): item is ComparisonHistoryItem => Boolean(item));
   const reportHtml = useMemo(() => (result ? buildHtmlReport(result, criteria) : ""), [result, criteria]);
+  const selectedResult = useMemo(
+    () => result?.ranking.find((item) => item.object_id === selectedResultId) ?? result?.ranking[0],
+    [result, selectedResultId],
+  );
 
   const visibleStages = user?.role === "admin" ? stages : stages.filter((stage) => stage.id !== "admin");
 
@@ -602,6 +787,7 @@ export function App() {
     setAnalysisMode("analog_search");
     setTargetRowId("");
     setResult(null);
+    setSelectedResultId("");
     setActiveProjectId(null);
     setHistoryProjectFilter("all");
     setHistoryCompareIds([]);
@@ -664,6 +850,12 @@ export function App() {
   useEffect(() => {
     void restoreSession();
   }, []);
+
+  useEffect(() => {
+    if (result?.ranking.length && !result.ranking.some((item) => item.object_id === selectedResultId)) {
+      setSelectedResultId(result.ranking[0].object_id);
+    }
+  }, [result, selectedResultId]);
 
   useEffect(() => {
     const state: SavedWorkflowState = {
@@ -805,6 +997,7 @@ export function App() {
     setLoading(true);
     setError(null);
     setResult(null);
+    setSelectedResultId("");
     try {
       const response = await profileFile(file);
       setDatasetFileId(response.dataset_file_id ?? null);
@@ -851,6 +1044,7 @@ export function App() {
         sourceFilename || file?.name,
       );
       setResult(response);
+      setSelectedResultId(response.ranking[0]?.object_id ?? "");
       setActiveStage("results");
       if (user) {
         void refreshHistory(false);
@@ -1498,6 +1692,16 @@ export function App() {
                         <strong>{formatSummaryValue(key, value)}</strong>
                       </div>
                     ))}
+                  </div>
+                  <div className="analytics-grid">
+                    <ResultBarChart
+                      result={result}
+                      mode={analysisMode}
+                      selectedId={selectedResult?.object_id ?? ""}
+                      onSelect={setSelectedResultId}
+                    />
+                    <RadarChart baseline={result.ranking[0]} selected={selectedResult} />
+                    <ContributionWaterfall item={selectedResult} />
                   </div>
                   <div className="insight-grid">
                     <div className="insight-card">

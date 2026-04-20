@@ -105,6 +105,8 @@ class PipelinePreprocessRefreshRequest(BaseModel):
     filename: str | None = None
     dataset_file_id: int
     fields: list[FieldConfig]
+    histogram_bins: int = Field(default=8, ge=2, le=64)
+    histogram_bins_by_field: dict[str, int] = Field(default_factory=dict)
 
 
 class PipelinePreprocessRefreshResponse(BaseModel):

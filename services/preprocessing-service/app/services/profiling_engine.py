@@ -345,13 +345,17 @@ def _profile_field(key: str, values: list[Any], rows_total: int, max_unique_valu
 def profile_dataset(payload: DatasetProfileRequest) -> DatasetProfileResponse:
     rows = payload.dataset.rows
     keys = sorted({key for row in rows for key in row.values.keys()})
+    bins_by_field = {
+        key: max(2, min(64, int(value)))
+        for key, value in (payload.histogram_bins_by_field or {}).items()
+    }
     fields = [
         _profile_field(
             key,
             [row.values.get(key) for row in rows],
             len(rows),
             payload.max_unique_values,
-            payload.histogram_bins,
+            bins_by_field.get(key, payload.histogram_bins),
         )
         for key in keys
     ]

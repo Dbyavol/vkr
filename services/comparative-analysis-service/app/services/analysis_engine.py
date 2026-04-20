@@ -213,6 +213,7 @@ def _build_ranked_rows(
 ) -> list[RankedObject]:
     rows: list[RankedObject] = []
     target_contributions: dict[str, float] | None = None
+    analog_mode = mode == "analog_search"
 
     for obj in objects:
         contributions: list[CriterionContribution] = []
@@ -234,7 +235,7 @@ def _build_ranked_rows(
                     note=normalized.note,
                 )
             )
-        if target_object_id and obj.id == target_object_id:
+        if analog_mode and target_object_id and obj.id == target_object_id:
             target_contributions = {item.key: item.normalized_value for item in contributions}
         top_positive = sorted(contributions, key=lambda item: item.contribution, reverse=True)[:3]
         top_negative = sorted(contributions, key=lambda item: item.contribution)[:2]
@@ -255,15 +256,18 @@ def _build_ranked_rows(
         )
 
     for row in rows:
-        row.similarity_to_target = _weighted_target_similarity(row.contributions, target_contributions)
-        if mode == "analog_search" and row.similarity_to_target is not None:
+        if analog_mode:
+            row.similarity_to_target = _weighted_target_similarity(row.contributions, target_contributions)
+        else:
+            row.similarity_to_target = None
+        if analog_mode and row.similarity_to_target is not None:
             row.score = row.similarity_to_target
             row.explanation = (
                 f"Сходство с целевым объектом: {row.similarity_to_target:.4f}. "
                 f"Расчет выполнен по взвешенной близости нормализованных критериев."
             )
 
-    if mode == "analog_search" and target_object_id:
+    if analog_mode and target_object_id:
         rows = [row for row in rows if row.object_id != target_object_id]
 
     rows.sort(

@@ -1107,6 +1107,54 @@ th {
   font-size: 13px;
 }
 
+.round-checkbox {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 10px;
+  color: var(--ink) !important;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.round-checkbox input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.round-checkbox span {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.round-checkbox span i {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  display: inline-block;
+  border-radius: 999px;
+  border: 2px solid #9db3d1;
+  background: #fff;
+  box-shadow: inset 0 0 0 2px #fff;
+  transition: all 160ms ease;
+}
+
+.round-checkbox input:checked + span i {
+  border-color: var(--blue);
+  background: linear-gradient(180deg, var(--blue), var(--cyan));
+  box-shadow: inset 0 0 0 3px #fff;
+}
+
+.round-checkbox input:focus-visible + span i {
+  outline: 3px solid rgba(37, 99, 235, 0.18);
+  outline-offset: 2px;
+}
+
+.round-checkbox span em {
+  font-style: normal;
+}
+
 .criteria-board {
   display: grid;
   gap: 14px;
@@ -2014,6 +2062,141 @@ th {
     radial-gradient(circle at top left, rgba(14, 165, 233, 0.16), transparent 34%),
     #ffffff;
   box-shadow: 0 30px 90px rgba(15, 23, 42, 0.34);
+}
+
+.object-modal {
+  position: relative;
+  display: grid;
+  grid-template-rows: auto auto auto minmax(220px, 1fr);
+  gap: 16px;
+  width: min(1120px, 100%);
+  max-height: 90vh;
+  padding: 24px;
+  overflow: auto;
+  border: 1px solid rgba(255, 255, 255, 0.62);
+  border-radius: 30px;
+  background:
+    radial-gradient(circle at top right, rgba(37, 99, 235, 0.14), transparent 32%),
+    linear-gradient(180deg, #ffffff, #f8fbff);
+  box-shadow: 0 30px 90px rgba(15, 23, 42, 0.34);
+}
+
+.object-modal-head {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 20px;
+  padding-right: 48px;
+}
+
+.object-modal-head h2 {
+  margin: 8px 0;
+  font-size: 32px;
+  letter-spacing: -0.04em;
+}
+
+.object-modal-head p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.object-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+.metric.mini {
+  padding: 14px 16px;
+}
+
+.metric.mini span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.metric.mini strong {
+  display: block;
+  margin-top: 8px;
+  font-size: 20px;
+}
+
+.object-values-panel {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.76);
+}
+
+.object-value-row {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(248, 250, 252, 0.98), rgba(255, 255, 255, 0.92));
+}
+
+.object-value-row span {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.object-value-row strong {
+  color: var(--ink);
+  word-break: break-word;
+  line-height: 1.45;
+}
+
+.object-notes-grid {
+  display: grid;
+  grid-template-columns: 1.1fr 0.9fr;
+  gap: 14px;
+}
+
+.object-notes-card {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.object-notes-card p {
+  margin: 0;
+  color: var(--ink);
+  line-height: 1.5;
+}
+
+.object-contributions {
+  display: grid;
+  gap: 8px;
+}
+
+.object-contribution {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(247, 250, 255, 0.92);
+}
+
+.object-contribution span {
+  color: var(--muted);
+}
+
+.object-contribution strong {
+  color: var(--ink);
 }
 
 .report-modal-head {

@@ -7,8 +7,6 @@ from app.schemas.files import (
     ComparisonHistoryCreate,
     ComparisonHistoryResultFileUpdate,
     ComparisonHistoryRead,
-    DatasetCreate,
-    DatasetRead,
     FileRead,
     ProjectCreate,
     ProjectRead,
@@ -16,14 +14,10 @@ from app.schemas.files import (
 )
 from app.services.file_service import (
     StorageAdapter,
-    create_dataset,
     create_comparison_history,
     create_file_record,
     create_project,
     get_file,
-    get_project,
-    get_comparison_history,
-    list_datasets,
     list_files,
     list_comparison_history,
     list_projects,
@@ -81,25 +75,6 @@ def download_file_content(file_id: int, db: Session = Depends(get_db)) -> Respon
     )
 
 
-@router.get("/files/{file_id}/download-url")
-def get_download_url(file_id: int, db: Session = Depends(get_db)) -> dict[str, str]:
-    item = get_file(db, file_id)
-    if item is None:
-        raise HTTPException(status_code=404, detail="File not found")
-    adapter = StorageAdapter()
-    return {"url": adapter.presigned_download_url(item.storage_key)}
-
-
-@router.get("/datasets", response_model=list[DatasetRead])
-def read_datasets(db: Session = Depends(get_db)) -> list[DatasetRead]:
-    return list_datasets(db)
-
-
-@router.post("/datasets", response_model=DatasetRead, status_code=201)
-def create_dataset_endpoint(payload: DatasetCreate, db: Session = Depends(get_db)) -> DatasetRead:
-    return create_dataset(db, payload)
-
-
 @router.get("/projects", response_model=list[ProjectRead])
 def read_projects(user_id: int | None = None, db: Session = Depends(get_db)) -> list[ProjectRead]:
     return list_projects(db, user_id=user_id)
@@ -110,19 +85,6 @@ def create_project_endpoint(payload: ProjectCreate, db: Session = Depends(get_db
     return create_project(db, payload)
 
 
-@router.get("/projects/{project_id}", response_model=ProjectRead)
-def read_project(project_id: int, db: Session = Depends(get_db)) -> ProjectRead:
-    item = get_project(db, project_id)
-    if item is None:
-        raise HTTPException(status_code=404, detail="Project not found")
-    return item
-
-
-@router.get("/projects/{project_id}/history", response_model=list[ComparisonHistoryRead])
-def read_project_history(project_id: int, db: Session = Depends(get_db)) -> list[ComparisonHistoryRead]:
-    return list_comparison_history(db, project_id=project_id)
-
-
 @router.get("/comparison-history", response_model=list[ComparisonHistoryRead])
 def read_comparison_history(
     user_id: int | None = None,
@@ -130,14 +92,6 @@ def read_comparison_history(
     db: Session = Depends(get_db),
 ) -> list[ComparisonHistoryRead]:
     return list_comparison_history(db, user_id=user_id, project_id=project_id)
-
-
-@router.get("/comparison-history/{history_id}", response_model=ComparisonHistoryRead)
-def read_comparison_history_item(history_id: int, db: Session = Depends(get_db)) -> ComparisonHistoryRead:
-    item = get_comparison_history(db, history_id)
-    if item is None:
-        raise HTTPException(status_code=404, detail="Comparison history item not found")
-    return item
 
 
 @router.patch("/comparison-history/{history_id}/result-file", response_model=ComparisonHistoryRead)

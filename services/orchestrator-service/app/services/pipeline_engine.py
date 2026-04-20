@@ -127,11 +127,14 @@ async def profile_imported_dataset(
     *,
     settings: Settings,
     rows: list[dict[str, Any]],
+    histogram_bins: int = 8,
+    histogram_bins_by_field: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     payload = {
         "dataset": {"rows": rows},
         "max_unique_values": 30,
-        "histogram_bins": 8,
+        "histogram_bins": histogram_bins,
+        "histogram_bins_by_field": histogram_bins_by_field or {},
     }
     async with httpx.AsyncClient(timeout=settings.request_timeout_seconds, trust_env=False) as client:
         response = await client.post(
@@ -484,6 +487,8 @@ async def refresh_preprocessing_from_storage(
     dataset_file_id: int,
     filename: str | None,
     fields: list[dict[str, Any]],
+    histogram_bins: int = 8,
+    histogram_bins_by_field: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     metadata = await fetch_stored_file_metadata(settings=settings, file_id=dataset_file_id)
     body = await fetch_stored_file_body(settings=settings, file_id=dataset_file_id)
@@ -494,7 +499,12 @@ async def refresh_preprocessing_from_storage(
         rows=import_preview["normalized_dataset"]["rows"],
         fields=fields,
     )
-    profile = await profile_imported_dataset(settings=settings, rows=preprocessing["dataset"])
+    profile = await profile_imported_dataset(
+        settings=settings,
+        rows=preprocessing["dataset"],
+        histogram_bins=histogram_bins,
+        histogram_bins_by_field=histogram_bins_by_field,
+    )
     refreshed_preview = _build_preview_from_processed(
         filename=resolved_filename,
         rows=preprocessing["dataset"],

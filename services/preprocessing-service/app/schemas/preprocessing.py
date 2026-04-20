@@ -156,6 +156,7 @@ class DatasetProfileRequest(BaseModel):
     dataset: DatasetPayload
     max_unique_values: int = 30
     histogram_bins: int = 8
+    histogram_bins_by_field: dict[str, int] = Field(default_factory=dict)
 
 
 class DatasetProfileResponse(BaseModel):

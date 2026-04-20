@@ -34,7 +34,7 @@ import type {
 } from "./types";
 
 type StageId = "data" | "preprocessing" | "criteria" | "results" | "projects" | "history" | "admin";
-type PrepSectionId = "types" | "missing" | "outliers";
+type PrepSectionId = "types" | "missing" | "outliers" | "encoding" | "scaling";
 
 const stages: Array<{ id: StageId; title: string; caption: string }> = [
   { id: "data", title: "Данные", caption: "Загрузка и предпросмотр" },
@@ -46,8 +46,10 @@ const stages: Array<{ id: StageId; title: string; caption: string }> = [
 
 const prepSections: Array<{ id: PrepSectionId; title: string; caption: string }> = [
   { id: "types", title: "Типы данных", caption: "Единый выбор типа по колонкам" },
+  { id: "encoding", title: "Энкодинг", caption: "Кодирование категориальных колонок" },
   { id: "missing", title: "Пропуски", caption: "Строки с missing и действие по колонке" },
   { id: "outliers", title: "Выбросы", caption: "Графики и действие по числовым колонкам" },
+  { id: "scaling", title: "Масштабирование", caption: "Нормализация числовых признаков" },
 ];
 
 const numericNameHints = ["price", "cost", "area", "rating", "score", "days", "months", "amount", "value"];
@@ -68,6 +70,11 @@ function uniqueSamples(column: PreviewColumn) {
   return Array.from(new Set(column.sample_values.filter((value) => value !== null && value !== "").map(String)));
 }
 
+function buildOrdinalMap(samples: string[]) {
+  if (!samples.length) return undefined;
+  return Object.fromEntries(samples.map((value, index) => [value, Number(((index + 1) / samples.length).toFixed(2))]));
+}
+
 function fieldDefaults(column: PreviewColumn): FieldConfig {
   const fieldType = inferUiType(column);
   const categories = uniqueSamples(column);
@@ -80,10 +87,7 @@ function fieldDefaults(column: PreviewColumn): FieldConfig {
     outlier_threshold: 1.5,
     normalization: "none",
     encoding: "none",
-    ordinal_map:
-      fieldType === "categorical"
-        ? Object.fromEntries(categories.map((value, index) => [value, Number(((index + 1) / categories.length).toFixed(2))]))
-        : undefined,
+    ordinal_map: fieldType === "categorical" ? buildOrdinalMap(categories) : undefined,
     binary_map: fieldType === "binary" ? { true: 1, false: 0, "1": 1, "0": 0 } : undefined,
   };
 }
@@ -155,47 +159,23 @@ function MiniDistribution({ column, fieldProfile }: { column?: PreviewColumn; fi
 }
 
 function DistributionChart({
-  column,
   fieldProfile,
   title,
-  rawValues,
 }: {
-  column?: PreviewColumn;
   fieldProfile?: FieldProfile;
   title: string;
-  rawValues?: number[];
 }) {
-  const [showWhiskers, setShowWhiskers] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const histogram = fieldProfile?.histogram ?? [];
-  const values = (rawValues && rawValues.length ? rawValues : numericSamples(column)).filter((value) => Number.isFinite(value));
-  const maxValue = Math.max(...histogram.map((point) => point.value), values.length || 1, 1);
+  const maxValue = Math.max(...histogram.map((point) => point.value), 1);
 
-  if (!histogram.length && values.length < 2) {
+  if (!histogram.length) {
     return <p className="muted-note">Недостаточно данных для графика {title.toLowerCase()}.</p>;
   }
 
-  const series = histogram.length
-    ? histogram
-    : values.slice(0, 14).map((value, index) => ({ label: String(index + 1), value }));
-
-  const sorted = [...values].sort((a, b) => a - b);
-  const q1 = percentile(sorted, 0.25);
-  const median = percentile(sorted, 0.5);
-  const q3 = percentile(sorted, 0.75);
-  const iqr = q3 - q1;
-  const lowerFence = q1 - 1.5 * iqr;
-  const upperFence = q3 + 1.5 * iqr;
-  const inliers = sorted.filter((value) => value >= lowerFence && value <= upperFence);
-  const whiskerMin = inliers.length ? inliers[0] : sorted[0];
-  const whiskerMax = inliers.length ? inliers[inliers.length - 1] : sorted[sorted.length - 1];
-  const outliers = sorted.filter((value) => value < lowerFence || value > upperFence);
-  const minValue = sorted[0] ?? 0;
-  const maxRawValue = sorted[sorted.length - 1] ?? 1;
-
   const renderHistogram = (width: number, height: number) => {
-    const barWidth = Math.max(10, Math.floor(width / Math.max(series.length, 1)) - 8);
-    const labelStep = Math.max(1, Math.ceil(series.length / 12));
+    const barWidth = Math.max(10, Math.floor(width / Math.max(histogram.length, 1)) - 8);
+    const labelStep = Math.max(1, Math.ceil(histogram.length / 12));
     return (
       <svg width="100%" height={height + 52} viewBox={`0 0 ${width} ${height + 52}`} role="img" aria-label={title}>
         <rect x="0" y="0" width={width} height={height} fill="#f8fafc" stroke="#d7dde8" />
@@ -203,11 +183,11 @@ function DistributionChart({
         <line x1="0" y1={Math.round(height * 0.75)} x2={width} y2={Math.round(height * 0.75)} stroke="#e1e8f0" strokeWidth="1" />
         <line x1="0" y1={Math.round(height * 0.5)} x2={width} y2={Math.round(height * 0.5)} stroke="#e1e8f0" strokeWidth="1" />
         <line x1="0" y1={Math.round(height * 0.25)} x2={width} y2={Math.round(height * 0.25)} stroke="#e1e8f0" strokeWidth="1" />
-        {series.map((point, index) => {
+        {histogram.map((point, index) => {
           const x = 4 + index * (barWidth + 8);
           const barHeight = Math.max(2, Math.round((point.value / maxValue) * (height - 12)));
           const y = height - barHeight;
-          const shouldShowLabel = index % labelStep === 0 || index === series.length - 1;
+          const shouldShowLabel = index % labelStep === 0 || index === histogram.length - 1;
           return (
             <g key={point.label}>
               <rect x={x} y={y} width={barWidth} height={barHeight} fill="#2f6b9a" opacity="0.9" rx="2" />
@@ -229,45 +209,14 @@ function DistributionChart({
     );
   };
 
-  const renderBoxPlot = (width: number) => {
-    const scaleX = (value: number) => {
-      const range = maxRawValue - minValue || 1;
-      return 24 + ((value - minValue) / range) * (width - 48);
-    };
-    return (
-      <svg width="100%" height="148" viewBox={`0 0 ${width} 148`} role="img" aria-label={`${title} boxplot`}>
-        <rect x="0" y="26" width={width} height="72" fill="#f8fafc" stroke="#d7dde8" />
-        <line x1="24" y1="62" x2={width - 24} y2="62" stroke="#6b7280" strokeWidth="1" />
-        <line x1={scaleX(whiskerMin)} y1="42" x2={scaleX(whiskerMin)} y2="82" stroke="#334155" strokeWidth="1.5" />
-        <line x1={scaleX(whiskerMax)} y1="42" x2={scaleX(whiskerMax)} y2="82" stroke="#334155" strokeWidth="1.5" />
-        <line x1={scaleX(whiskerMin)} y1="62" x2={scaleX(q1)} y2="62" stroke="#334155" strokeWidth="1.5" />
-        <line x1={scaleX(q3)} y1="62" x2={scaleX(whiskerMax)} y2="62" stroke="#334155" strokeWidth="1.5" />
-        <rect x={scaleX(q1)} y="42" width={Math.max(2, scaleX(q3) - scaleX(q1))} height="40" fill="#dbeafe" stroke="#2563eb" strokeWidth="1.5" />
-        <line x1={scaleX(median)} y1="42" x2={scaleX(median)} y2="82" stroke="#1d4ed8" strokeWidth="2" />
-        {outliers.map((value, index) => (
-          <circle key={`outlier-${value}-${index}`} cx={scaleX(value)} cy="62" r="2.8" fill="#b42318" />
-        ))}
-        <text x="24" y="124" fontSize="10" fill="#334155">min: {minValue.toFixed(2)}</text>
-        <text x={width / 2 - 42} y="124" fontSize="10" fill="#334155">median: {median.toFixed(2)}</text>
-        <text x={width - 128} y="124" fontSize="10" fill="#334155">max: {maxRawValue.toFixed(2)}</text>
-      </svg>
-    );
-  };
-
   return (
     <div className="chart-frame" title={title}>
       <div className="chart-toolbar">
         <strong>{title}</strong>
-        <div className="chart-toggle">
-          <span>{showWhiskers ? "Box plot" : "Гистограмма"}</span>
-          <label className="switch" title="Переключить на график с усами">
-            <input type="checkbox" checked={showWhiskers} onChange={(event) => setShowWhiskers(event.target.checked)} />
-            <span />
-          </label>
-        </div>
+        <div className="chart-toggle"><span>Гистограмма</span></div>
       </div>
       <button className="chart-canvas-trigger" onClick={() => setExpanded(true)} title="Открыть график в большом виде">
-        {!showWhiskers ? renderHistogram(980, 260) : renderBoxPlot(980)}
+        {renderHistogram(980, 260)}
       </button>
 
       {expanded ? (
@@ -278,33 +227,13 @@ function DistributionChart({
               <button className="modal-close" onClick={() => setExpanded(false)} aria-label="Закрыть">×</button>
             </div>
             <div className="chart-modal-body">
-              {!showWhiskers ? renderHistogram(1600, 440) : renderBoxPlot(1600)}
+              {renderHistogram(1600, 440)}
             </div>
           </section>
         </div>
       ) : null}
     </div>
   );
-}
-
-function formatPreviewCell(value: unknown) {
-  if (value === null || value === undefined || value === "") {
-    return "пусто";
-  }
-  return String(value);
-}
-
-function criteriaDefaults(fields: FieldConfig[], recommendedWeights?: Record<string, number>): CriterionConfig[] {
-  const analyticFields = fields.filter((field) => field.field_type !== "text" && field.field_type !== "datetime" && field.include_in_output);
-  const fallbackWeight = analyticFields.length ? Number((1 / analyticFields.length).toFixed(4)) : 1;
-  return analyticFields.map((field) => ({
-    key: field.key,
-    name: field.key.replace(/_/g, " "),
-    weight: recommendedWeights?.[field.key] ?? fallbackWeight,
-    type: field.field_type === "categorical" ? "categorical" : field.field_type === "binary" ? "binary" : "numeric",
-    direction: minimizeHints.some((hint) => field.key.includes(hint)) ? "minimize" : "maximize",
-    scale_map: field.ordinal_map ?? field.binary_map,
-  }));
 }
 
 function downloadBlob(filename: string, content: string, type: string) {
@@ -315,6 +244,35 @@ function downloadBlob(filename: string, content: string, type: string) {
   link.download = filename;
   link.click();
   URL.revokeObjectURL(url);
+}
+
+function formatPreviewCell(value: unknown) {
+  if (value === null || value === undefined || value === "") {
+    return "пусто";
+  }
+  return String(value);
+}
+
+function criteriaDefaults(
+  fields: FieldConfig[],
+  recommendedWeights?: Record<string, number>,
+  analysisMode: AnalysisMode = "rating",
+): CriterionConfig[] {
+  const analyticFields = fields.filter((field) => field.field_type !== "text" && field.field_type !== "datetime" && field.include_in_output);
+  const fallbackWeight = analyticFields.length ? Number((1 / analyticFields.length).toFixed(4)) : 1;
+  return analyticFields.map((field) => ({
+    key: field.key,
+    name: field.key.replace(/_/g, " "),
+    weight: recommendedWeights?.[field.key] ?? fallbackWeight,
+    type: field.field_type === "categorical" ? "categorical" : field.field_type === "binary" ? "binary" : "numeric",
+    direction:
+      analysisMode === "analog_search"
+        ? "target"
+        : minimizeHints.some((hint) => field.key.includes(hint))
+          ? "minimize"
+          : "maximize",
+    scale_map: field.ordinal_map ?? field.binary_map,
+  }));
 }
 
 function formatMetricValue(value: unknown) {
@@ -406,6 +364,9 @@ const FIELD_TYPE_LABELS: Record<string, string> = {
 
 const METHOD_LABELS: Record<string, string> = {
   none: "Не применять",
+  one_hot: "One-hot",
+  ordinal: "Порядковый",
+  binary_map: "Бинарная карта",
   median: "Заполнить медианой",
   mean: "Заполнить средним",
   mode: "Заполнить модой",
@@ -515,6 +476,7 @@ type SavedWorkflowState = {
   profile?: FieldProfile[];
   quality?: DatasetQualityReport | null;
   recommendedWeights?: Record<string, number>;
+  recommendedCriteria?: CriterionConfig[];
   weightNotes?: string[];
   fields?: FieldConfig[];
   criteria?: CriterionConfig[];
@@ -525,7 +487,8 @@ type SavedWorkflowState = {
   historyProjectFilter?: number | "all";
   scenarioTitle?: string;
   sourceFilename?: string;
-  preprocessingSection?: PrepSectionId;
+  preprocessingSection?: PrepSectionId | "selection";
+  histogramBinsByField?: Record<string, number>;
   missingMatrixPreview?: Array<{ id: string; missing_count: number; missing_fields: string[] }>;
   correlationMatrix?: Array<{ left_key: string; right_key: string; pearson: number; samples: number }>;
   lastHistoryId?: number | null;
@@ -695,16 +658,31 @@ function contributionLabel(value: unknown) {
   return text.length > 18 ? `${text.slice(0, 18)}...` : text;
 }
 
+function objectValueLabel(value: unknown) {
+  if (value === null || value === undefined || value === "") {
+    return "пусто";
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? compactNumber(value) : "пусто";
+  }
+  if (typeof value === "boolean") {
+    return value ? "да" : "нет";
+  }
+  return String(value);
+}
+
 function ResultBarChart({
   result,
   mode,
   selectedId,
   onSelect,
+  onInspect,
 }: {
   result: PipelineResult;
   mode: AnalysisMode;
   selectedId: string;
   onSelect: (objectId: string) => void;
+  onInspect: (objectId: string) => void;
 }) {
   const rows = result.ranking.slice(0, 10);
   const maxValue = Math.max(...rows.map((item) => chartValue(item, mode)), 0.0001);
@@ -725,7 +703,10 @@ function ResultBarChart({
             <button
               className={`result-bar ${selectedId === item.object_id ? "active" : ""}`}
               key={item.object_id}
-              onClick={() => onSelect(item.object_id)}
+              onClick={() => {
+                onSelect(item.object_id);
+                onInspect(item.object_id);
+              }}
               title={`${item.title}: ${compactNumber(value)}`}
             >
               <span className="result-bar-rank">#{item.rank}</span>
@@ -738,6 +719,90 @@ function ResultBarChart({
           );
         })}
       </div>
+    </div>
+  );
+}
+
+function ObjectDetailsModal({
+  open,
+  onClose,
+  item,
+  row,
+  columns,
+  mode,
+}: {
+  open: boolean;
+  onClose: () => void;
+  item?: RankedItem;
+  row?: { id: string; values: Record<string, unknown> };
+  columns: PreviewColumn[];
+  mode: AnalysisMode;
+}) {
+  if (!open || !item) return null;
+  const orderedColumns = columns.length ? columns : Object.keys(row?.values ?? {}).map((key) => ({ normalized_name: key } as PreviewColumn));
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <section className="object-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="object-modal-head">
+          <div>
+            <span className="section-kicker">Карточка объекта</span>
+            <h2>{item.title}</h2>
+            <p>Подробные значения всех колонок для выбранного объекта.</p>
+          </div>
+          <button className="modal-close" onClick={onClose} aria-label="Закрыть">×</button>
+        </div>
+
+        <div className="object-meta-grid">
+          <div className="metric mini">
+            <span>ID</span>
+            <strong>{row?.id ?? item.object_id}</strong>
+          </div>
+          <div className="metric mini">
+            <span>Место</span>
+            <strong>#{item.rank}</strong>
+          </div>
+          <div className="metric mini">
+            <span>{mode === "analog_search" ? "Близость" : "Оценка"}</span>
+            <strong>
+              {mode === "analog_search" && item.similarity_to_target !== null && item.similarity_to_target !== undefined
+                ? item.similarity_to_target.toFixed(4)
+                : item.score.toFixed(4)}
+            </strong>
+          </div>
+        </div>
+
+        <div className="object-values-panel">
+          {orderedColumns.map((column) => {
+            const key = column.normalized_name;
+            const value = row?.values?.[key];
+            return (
+              <div className="object-value-row" key={key}>
+                <span>{key}</span>
+                <strong title={objectValueLabel(value)}>{objectValueLabel(value)}</strong>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="object-notes-grid">
+          <div className="object-notes-card">
+            <span className="section-kicker">Объяснение</span>
+            <p>{translateAnalysisText(item.explanation)}</p>
+          </div>
+          <div className="object-notes-card">
+            <span className="section-kicker">Вклады</span>
+            <div className="object-contributions">
+              {item.contributions.map((contribution) => (
+                <div className="object-contribution" key={contribution.key}>
+                  <span>{contribution.name}</span>
+                  <strong>{contribution.contribution.toFixed(3)}</strong>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </section>
     </div>
   );
 }
@@ -903,8 +968,10 @@ export function App() {
   const [targetRowId, setTargetRowId] = useState(savedWorkflow.targetRowId ?? "");
   const [result, setResult] = useState<PipelineResult | null>(savedWorkflow.result ?? null);
   const [selectedResultId, setSelectedResultId] = useState(savedWorkflow.result?.ranking?.[0]?.object_id ?? "");
+  const [inspectedObjectId, setInspectedObjectId] = useState<string | null>(null);
   const [lastHistoryId, setLastHistoryId] = useState<number | null>(savedWorkflow.lastHistoryId ?? null);
-  const [preprocessingSection, setPreprocessingSection] = useState<PrepSectionId>(savedWorkflow.preprocessingSection ?? "types");
+  const [preprocessingSection, setPreprocessingSection] = useState<PrepSectionId>(savedWorkflow.preprocessingSection === "selection" ? "types" : savedWorkflow.preprocessingSection ?? "types");
+  const [histogramBinsByField, setHistogramBinsByField] = useState<Record<string, number>>(savedWorkflow.histogramBinsByField ?? {});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [applyingSection, setApplyingSection] = useState<PrepSectionId | null>(null);
@@ -934,6 +1001,18 @@ export function App() {
     () => result?.ranking.find((item) => item.object_id === selectedResultId) ?? result?.ranking[0],
     [result, selectedResultId],
   );
+  const datasetRowById = useMemo(() => {
+    const rows = preview?.normalized_dataset?.rows ?? [];
+    return new Map(rows.map((row) => [row.id, row] as const));
+  }, [preview]);
+  const inspectedResult = useMemo(
+    () => result?.ranking.find((item) => item.object_id === inspectedObjectId) ?? null,
+    [result, inspectedObjectId],
+  );
+  const inspectedRow = useMemo(
+    () => (inspectedObjectId ? datasetRowById.get(inspectedObjectId) : undefined),
+    [datasetRowById, inspectedObjectId],
+  );
   const activeProjectLatestHistory = useMemo(() => {
     if (!activeProjectId) return null;
     return [...history]
@@ -946,6 +1025,49 @@ export function App() {
     const ids = new Set(missingMatrixPreview.map((item) => item.id));
     return rows.filter((row) => ids.has(row.id)).slice(0, 14);
   }, [preview, missingMatrixPreview]);
+  const fullDatasetOutlierTotal = useMemo(
+    () => profile.filter((field) => field.inferred_type === "numeric").reduce((sum, field) => sum + field.outlier_count_iqr, 0),
+    [profile],
+  );
+  const histogramBinsForRefresh = useMemo(
+    () =>
+      Object.fromEntries(
+        fields
+          .filter((field) => field.field_type === "numeric")
+          .map((field) => [field.key, Math.min(64, Math.max(2, histogramBinsByField[field.key] ?? 8))]),
+      ),
+    [fields, histogramBinsByField],
+  );
+
+  function buildOrdinalMapForField(fieldKey: string) {
+    const column = preview?.columns.find((item) => item.normalized_name === fieldKey);
+    const samples = column ? uniqueSamples(column) : [];
+    return buildOrdinalMap(samples) ?? { low: 0.25, medium: 0.5, high: 1 };
+  }
+
+  function updateFieldEncoding(index: number, encoding: FieldConfig["encoding"]) {
+    const field = fields[index];
+    if (!field) return;
+    if (encoding === "ordinal") {
+      updateField(index, {
+        encoding,
+        ordinal_map: field.ordinal_map && Object.keys(field.ordinal_map).length ? field.ordinal_map : buildOrdinalMapForField(field.key),
+      });
+      return;
+    }
+    if (encoding === "binary_map") {
+      updateField(index, {
+        encoding,
+        binary_map: field.binary_map ?? { true: 1, false: 0, "1": 1, "0": 0 },
+      });
+      return;
+    }
+    updateField(index, { encoding });
+  }
+
+  function updateFieldNormalization(index: number, normalization: FieldConfig["normalization"]) {
+    updateField(index, { normalization });
+  }
 
   const visibleStages = user?.role === "admin" ? stages : stages.filter((stage) => stage.id !== "admin");
 
@@ -987,6 +1109,7 @@ export function App() {
     setTargetRowId("");
     setResult(null);
     setSelectedResultId("");
+    setInspectedObjectId(null);
     setLastHistoryId(null);
     setActiveProjectId(null);
     setHistoryProjectFilter("all");
@@ -1084,6 +1207,7 @@ export function App() {
       scenarioTitle,
       sourceFilename,
       preprocessingSection,
+      histogramBinsByField,
       lastHistoryId,
     };
     localStorage.setItem(WORKFLOW_STORAGE_KEY, JSON.stringify(state));
@@ -1107,6 +1231,7 @@ export function App() {
     scenarioTitle,
     sourceFilename,
     preprocessingSection,
+    histogramBinsByField,
     lastHistoryId,
   ]);
 
@@ -1172,6 +1297,7 @@ export function App() {
     setError(null);
     setResult(null);
     setSelectedResultId("");
+    setInspectedObjectId(null);
     if (!projectId || !user) {
       setFile(null);
       setDatasetFileId(null);
@@ -1229,7 +1355,7 @@ export function App() {
 
       setFile(null);
       setFields(nextFields);
-      setCriteria(nextCriteria.length ? nextCriteria : criteriaDefaults(nextFields, recommendedWeights));
+      setCriteria(nextCriteria.length ? nextCriteria : criteriaDefaults(nextFields, recommendedWeights, parameters.analysis_mode === "rating" ? "rating" : "analog_search"));
       setTargetRowId(parameters.target_row_id ?? "");
       setAnalysisMode(parameters.analysis_mode === "rating" ? "rating" : "analog_search");
       setScenarioTitle(parameters.scenario_title ?? latest.title);
@@ -1238,7 +1364,14 @@ export function App() {
       setLastHistoryId(latest.id);
 
       if (latest.dataset_file_id && nextFields.length) {
-        const response = await refreshPreprocessing(latest.dataset_file_id, nextFields, latest.source_filename ?? undefined);
+        const nextHistogramBinsByField = Object.fromEntries(
+          nextFields
+            .filter((field) => field.field_type === "numeric")
+            .map((field) => [field.key, Math.min(64, Math.max(2, histogramBinsByField[field.key] ?? 8))]),
+        );
+        const response = await refreshPreprocessing(latest.dataset_file_id, nextFields, latest.source_filename ?? undefined, {
+          histogramBinsByField: nextHistogramBinsByField,
+        });
         setPreview(response.preview);
         setProfile(response.profile.fields);
         setQuality(response.profile.quality);
@@ -1326,7 +1459,7 @@ export function App() {
       setMissingMatrixPreview(response.profile.missing_matrix_preview ?? []);
       setCorrelationMatrix(response.profile.correlation_matrix ?? []);
       setFields(inferredFields);
-      setCriteria(criteriaDefaults(inferredFields, response.profile.recommended_weights));
+      setCriteria(criteriaDefaults(inferredFields, response.profile.recommended_weights, analysisMode));
       const firstRowId = response.preview.normalized_dataset?.rows?.[0]?.id ?? "";
       setTargetRowId(firstRowId);
     } catch (previewError) {
@@ -1359,6 +1492,7 @@ export function App() {
       );
       setResult(response);
       setSelectedResultId(response.ranking[0]?.object_id ?? "");
+      setInspectedObjectId(null);
       setLastHistoryId(response.history_id ?? null);
       setActiveStage("results");
       if (user) {
@@ -1384,7 +1518,9 @@ export function App() {
     setLoading(true);
     setError(null);
     try {
-      const response = await refreshPreprocessing(datasetFileId, fields, sourceFilename || preview?.filename || undefined);
+      const response = await refreshPreprocessing(datasetFileId, fields, sourceFilename || preview?.filename || undefined, {
+        histogramBinsByField: histogramBinsForRefresh,
+      });
       setPreview(response.preview);
       setProfile(response.profile.fields);
       setQuality(response.profile.quality);
@@ -1392,7 +1528,7 @@ export function App() {
       setWeightNotes(response.profile.weight_notes);
       setMissingMatrixPreview(response.profile.missing_matrix_preview ?? []);
       setCorrelationMatrix(response.profile.correlation_matrix ?? []);
-      setCriteria(criteriaDefaults(fields, response.profile.recommended_weights));
+      setCriteria(criteriaDefaults(fields, response.profile.recommended_weights, analysisMode));
     } catch (applyError) {
       setError(applyError instanceof Error ? applyError.message : "Не удалось применить настройки предобработки");
     } finally {
@@ -1432,7 +1568,7 @@ export function App() {
         missing_strategy: "mode",
         outlier_method: "none",
         normalization: "none",
-        encoding: "binary_map",
+        encoding: "none",
       });
     }
   }
@@ -1473,7 +1609,7 @@ export function App() {
   }
 
   function rebuildCriteria() {
-    setCriteria(criteriaDefaults(fields, recommendedWeights));
+    setCriteria(criteriaDefaults(fields, recommendedWeights, analysisMode));
     setActiveStage("criteria");
   }
 
@@ -1867,7 +2003,7 @@ export function App() {
                       <div className="quality-metrics">
                         <div><span>Аналитических полей</span><strong>{quality.analytic_fields_count}</strong></div>
                         <div><span>Пропусков</span><strong>{quality.total_missing_values}</strong></div>
-                        <div><span>Выбросов IQR</span><strong>{quality.total_outliers_iqr}</strong></div>
+                        <div><span>Выбросов IQR</span><strong>{fullDatasetOutlierTotal}</strong></div>
                         <div><span>Текстовых полей</span><strong>{quality.text_fields_count}</strong></div>
                       </div>
                     </div>
@@ -1900,6 +2036,7 @@ export function App() {
                             <th>Колонка</th>
                             <th>Примеры</th>
                             <th>Тип данных</th>
+                            <th>В сравнении</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -1921,11 +2058,127 @@ export function App() {
                                     <option value="datetime">{fieldTypeLabel("datetime")}</option>
                                   </select>
                                 </td>
+                                <td>
+                                  <label className="round-checkbox">
+                                    <input
+                                      type="checkbox"
+                                      checked={field.include_in_output}
+                                      onChange={(event) => updateField(index, { include_in_output: event.target.checked })}
+                                    />
+                                    <span>
+                                      <i />
+                                      <em>{field.include_in_output ? "Участвует" : "Исключен"}</em>
+                                    </span>
+                                  </label>
+                                </td>
                               </tr>
                             );
                           })}
                         </tbody>
                       </table>
+                    </div>
+                  </>
+                ) : null}
+
+                {preprocessingSection === "encoding" ? (
+                  <>
+                    <div className="prep-section-head">
+                      <p>Настройте кодирование категориальных колонок. Бинарные поля здесь не показываются: им энкодинг не нужен.</p>
+                      <button onClick={() => applyPreprocessingSection("encoding")} disabled={loading || !datasetFileId}>
+                        {applyingSection === "encoding" ? "Применяем..." : "Применить"}
+                      </button>
+                    </div>
+                    <div className="field-board">
+                      {fields
+                        .filter((field) => field.field_type === "categorical")
+                        .map((field) => {
+                          const index = fields.findIndex((item) => item.key === field.key);
+                          const disabled = !field.include_in_output;
+                          const column = preview?.columns.find((item) => item.normalized_name === field.key);
+                          const samples = column ? uniqueSamples(column).slice(0, 6) : [];
+                          return (
+                            <article className="field-card" key={`encoding-${field.key}`}>
+                              <div className="field-card-head">
+                                <div>
+                                  <strong>{field.key}</strong>
+                                  <span>{field.include_in_output ? "Участвует в анализе" : "Исключен из анализа"}</span>
+                                </div>
+                              </div>
+                              {samples.length ? (
+                                <div className="category-values">
+                                  {samples.map((sample) => (
+                                    <span key={`${field.key}-${sample}`}>{sample}</span>
+                                  ))}
+                                </div>
+                              ) : null}
+                              <div className="control-grid">
+                                <label>
+                                  Энкодинг
+                                  <select
+                                    value={field.encoding}
+                                    disabled={disabled}
+                                    onChange={(event) => updateFieldEncoding(index, event.target.value as FieldConfig["encoding"])}
+                                  >
+                                    <option value="none">{methodLabel("none")}</option>
+                                    <option value="one_hot">{methodLabel("one_hot")}</option>
+                                    <option value="ordinal">{methodLabel("ordinal")}</option>
+                                  </select>
+                                </label>
+                              </div>
+                            </article>
+                          );
+                        })}
+                      {!fields.some((field) => field.field_type === "categorical") ? (
+                        <p className="muted-note">Категориальные колонки не найдены. Назначьте тип в разделе «Типы данных».</p>
+                      ) : null}
+                    </div>
+                  </>
+                ) : null}
+
+                {preprocessingSection === "scaling" ? (
+                  <>
+                    <div className="prep-section-head">
+                      <p>Настройте масштабирование числовых признаков. Неактивные колонки остаются в датасете, но не участвуют в дальнейшем анализе.</p>
+                      <button onClick={() => applyPreprocessingSection("scaling")} disabled={loading || !datasetFileId}>
+                        {applyingSection === "scaling" ? "Применяем..." : "Применить"}
+                      </button>
+                    </div>
+                    <div className="field-board">
+                      {fields
+                        .filter((field) => field.field_type === "numeric")
+                        .map((field) => {
+                          const index = fields.findIndex((item) => item.key === field.key);
+                          const disabled = !field.include_in_output;
+                          return (
+                            <article className="field-card" key={`scaling-${field.key}`}>
+                              <div className="field-card-head">
+                                <div>
+                                  <strong>{field.key}</strong>
+                                  <span>{disabled ? "Исключен из анализа" : "Участвует в анализе"}</span>
+                                </div>
+                              </div>
+                              <div className="control-grid">
+                                <label>
+                                  Масштабирование
+                                  <select
+                                    value={field.normalization}
+                                    disabled={disabled}
+                                    onChange={(event) => updateFieldNormalization(index, event.target.value as FieldConfig["normalization"])}
+                                  >
+                                    <option value="none">{methodLabel("none")}</option>
+                                    <option value="minmax">{methodLabel("minmax")}</option>
+                                    <option value="zscore">{methodLabel("zscore")}</option>
+                                    <option value="robust">{methodLabel("robust")}</option>
+                                    <option value="log_minmax">{methodLabel("log_minmax")}</option>
+                                  </select>
+                                </label>
+                              </div>
+                            </article>
+                          );
+                        })}
+                      {!fields.some((field) => field.field_type === "numeric") ? (
+                        <p className="muted-note">Числовые колонки не найдены. Назначьте тип в разделе «Типы данных».</p>
+                      ) : null}
                     </div>
                   </>
                 ) : null}
@@ -2025,32 +2278,39 @@ export function App() {
                     <div className="field-board">
                       {fields
                         .filter((field) => field.field_type === "numeric")
-                        .filter((field) => outlierRowsForField(preview, field.key).length > 0)
                         .map((field) => {
                           const index = fields.findIndex((item) => item.key === field.key);
-                          const outliers = outlierRowsForField(preview, field.key);
+                          const fieldProfile = profile.find((item) => item.key === field.key);
+                          const outliersCount = fieldProfile?.outlier_count_iqr ?? 0;
                           return (
                             <article className="field-card" key={field.key}>
                               <div className="field-card-head">
                                 <div>
                                   <strong>{field.key}</strong>
-                                  <span>Найдено выбросов: {outliers.length}</span>
+                                  <span>Найдено выбросов: {outliersCount}</span>
                                 </div>
                               </div>
                               <DistributionChart
                                 title={`Распределение ${field.key}`}
-                                column={preview?.columns.find((column) => column.normalized_name === field.key)}
-                                fieldProfile={profile.find((item) => item.key === field.key)}
-                                rawValues={(preview?.normalized_dataset?.rows ?? [])
-                                  .map((row) => Number(String(row.values[field.key] ?? "").replace(",", ".")))
-                                  .filter((value) => Number.isFinite(value))}
+                                fieldProfile={fieldProfile}
                               />
-                              <div className="outlier-row-list">
-                                {outliers.slice(0, 10).map((item) => (
-                                  <span key={`${field.key}-${item.id}`}>id {item.id}: {item.value}</span>
-                                ))}
-                              </div>
                               <div className="control-grid">
+                                <label>
+                                  Столбцов гистограммы
+                                  <input
+                                    type="number"
+                                    min={2}
+                                    max={64}
+                                    step="1"
+                                    value={histogramBinsByField[field.key] ?? 8}
+                                    onChange={(event) =>
+                                      setHistogramBinsByField((current) => ({
+                                        ...current,
+                                        [field.key]: Math.min(64, Math.max(2, Number(event.target.value) || 8)),
+                                      }))
+                                    }
+                                  />
+                                </label>
                                 <label>
                                   Что делать с выбросами
                                   <select value={field.outlier_method} onChange={(event) => updateField(index, { outlier_method: event.target.value })}>
@@ -2075,8 +2335,8 @@ export function App() {
                             </article>
                           );
                         })}
-                      {!fields.filter((field) => field.field_type === "numeric").some((field) => outlierRowsForField(preview, field.key).length > 0) ? (
-                        <p className="muted-note">В текущем предпросмотре не найдено выраженных выбросов по числовым колонкам.</p>
+                      {!fields.some((field) => field.field_type === "numeric") ? (
+                        <p className="muted-note">В текущей конфигурации нет числовых колонок для построения гистограмм.</p>
                       ) : null}
                     </div>
                   </>
@@ -2231,6 +2491,7 @@ export function App() {
                       mode={analysisMode}
                       selectedId={selectedResult?.object_id ?? ""}
                       onSelect={setSelectedResultId}
+                      onInspect={setInspectedObjectId}
                     />
                     <RadarChart baseline={result.ranking[0]} selected={selectedResult} />
                     <ContributionWaterfall item={selectedResult} />
@@ -2318,6 +2579,15 @@ export function App() {
             </div>
           </section>
         ) : null}
+
+        <ObjectDetailsModal
+          open={Boolean(inspectedResult)}
+          onClose={() => setInspectedObjectId(null)}
+          item={inspectedResult ?? undefined}
+          row={inspectedRow}
+          columns={preview?.columns ?? []}
+          mode={analysisMode}
+        />
 
         {activeStage === "projects" ? (
           <section className="panel">

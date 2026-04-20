@@ -8,7 +8,6 @@ from docx import Document
 
 from app.core_config import get_settings
 from app.schemas.pipeline import (
-    ImportedPreview,
     PipelineConfig,
     PipelinePreprocessRefreshRequest,
     PipelinePreprocessRefreshResponse,
@@ -19,8 +18,6 @@ from app.schemas.pipeline import (
     ReportRequest,
 )
 from app.services.pipeline_engine import (
-    fetch_dataset_profile,
-    fetch_preview,
     fetch_system_dashboard,
     refresh_preprocessing_from_storage,
     run_pipeline_from_storage,
@@ -107,31 +104,6 @@ async def system_dashboard(authorization: str | None = Header(default=None)) -> 
     return await fetch_system_dashboard(settings=settings, authorization=authorization)
 
 
-@app.post("/api/v1/pipeline/preview", response_model=ImportedPreview)
-async def pipeline_preview(file: UploadFile = File(...)) -> ImportedPreview:
-    try:
-        body = await file.read()
-        data = await fetch_preview(settings=settings, filename=file.filename or "dataset", body=body)
-        return ImportedPreview.model_validate(data)
-    except (ValueError, httpx.HTTPError) as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={"code": "PIPELINE_PREVIEW_ERROR", "message": str(exc)},
-        ) from exc
-
-
-@app.post("/api/v1/pipeline/profile")
-async def pipeline_profile(file: UploadFile = File(...)) -> dict:
-    try:
-        body = await file.read()
-        return await fetch_dataset_profile(settings=settings, filename=file.filename or "dataset", body=body)
-    except (ValueError, httpx.HTTPError) as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={"code": "PIPELINE_PROFILE_ERROR", "message": str(exc)},
-        ) from exc
-
-
 @app.post("/api/v1/pipeline/upload-profile", response_model=PipelineProfileStoredResponse)
 async def pipeline_upload_profile(file: UploadFile = File(...)) -> PipelineProfileStoredResponse:
     try:
@@ -198,6 +170,8 @@ async def pipeline_preprocess_refresh(payload: PipelinePreprocessRefreshRequest)
             dataset_file_id=payload.dataset_file_id,
             filename=payload.filename,
             fields=[field.model_dump() for field in payload.fields],
+            histogram_bins=payload.histogram_bins,
+            histogram_bins_by_field=payload.histogram_bins_by_field,
         )
         return PipelinePreprocessRefreshResponse.model_validate(data)
     except (ValueError, httpx.HTTPError) as exc:

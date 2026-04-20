@@ -187,6 +187,7 @@ export async function refreshPreprocessing(
   datasetFileId: number,
   fields: FieldConfig[],
   filename?: string,
+  options?: { histogramBins?: number; histogramBinsByField?: Record<string, number> },
 ): Promise<PreprocessingRefreshResponse> {
   const response = await fetch(`${ORCHESTRATOR_URL}/pipeline/preprocess-refresh`, {
     method: "POST",
@@ -195,6 +196,8 @@ export async function refreshPreprocessing(
       dataset_file_id: datasetFileId,
       filename: filename || null,
       fields,
+      histogram_bins: options?.histogramBins ?? 8,
+      histogram_bins_by_field: options?.histogramBinsByField ?? {},
     }),
   });
 

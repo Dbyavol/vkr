@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import katex from "katex";
+import "katex/dist/katex.min.css";
 import {
   bindReportToHistory,
   createProject,
@@ -35,6 +37,7 @@ import type {
 
 type StageId = "data" | "preprocessing" | "criteria" | "results" | "projects" | "history" | "admin";
 type PrepSectionId = "types" | "missing" | "outliers" | "encoding" | "scaling";
+type ChartMode = "histogram" | "boxplot";
 
 const stages: Array<{ id: StageId; title: string; caption: string }> = [
   { id: "data", title: "Данные", caption: "Загрузка и предпросмотр" },
@@ -99,6 +102,54 @@ function numericSamples(column?: PreviewColumn) {
     .filter((value) => Number.isFinite(value));
 }
 
+function numericValuesForField(preview: PreviewResponse | null, key: string) {
+  return (preview?.normalized_dataset?.rows ?? [])
+    .map((row) => Number(String(row.values[key] ?? "").replace(",", ".")))
+    .filter((value) => Number.isFinite(value));
+}
+
+function histogramFromValues(values: number[], bins: number) {
+  if (!values.length) return [];
+  if (bins <= 1 || values.length === 1) {
+    const value = values[0] ?? 0;
+    return [{ label: String(value), value: values.length }];
+  }
+
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  if (min === max) {
+    return [{ label: String(min), value: values.length }];
+  }
+
+  const counts = Array.from({ length: bins }, () => 0);
+  for (const value of values) {
+    const index = Math.min(bins - 1, Math.floor(((value - min) / (max - min)) * bins));
+    counts[index] += 1;
+  }
+
+  const step = (max - min) / bins;
+  return counts.map((count, index) => {
+    const start = min + index * step;
+    const end = index === bins - 1 ? max : start + step;
+    return {
+      label: `${start.toFixed(1)}–${end.toFixed(1)}`,
+      value: count,
+    };
+  });
+}
+
+function boxplotStats(values: number[]) {
+  if (!values.length) return null;
+  const ordered = [...values].sort((left, right) => left - right);
+  return {
+    min: ordered[0],
+    q1: percentile(ordered, 0.25),
+    median: percentile(ordered, 0.5),
+    q3: percentile(ordered, 0.75),
+    max: ordered[ordered.length - 1],
+  };
+}
+
 function percentile(values: number[], fraction: number) {
   if (!values.length) return 0;
   const sorted = [...values].sort((a, b) => a - b);
@@ -159,21 +210,29 @@ function MiniDistribution({ column, fieldProfile }: { column?: PreviewColumn; fi
 }
 
 function DistributionChart({
-  fieldProfile,
   title,
+  values,
+  bins,
+  mode,
 }: {
-  fieldProfile?: FieldProfile;
   title: string;
+  values: number[];
+  bins: number;
+  mode: ChartMode;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const histogram = fieldProfile?.histogram ?? [];
-  const maxValue = Math.max(...histogram.map((point) => point.value), 1);
+  const histogram = useMemo(() => histogramFromValues(values, bins), [values, bins]);
+  const stats = useMemo(() => boxplotStats(values), [values]);
 
-  if (!histogram.length) {
+  if (!values.length) {
     return <p className="muted-note">Недостаточно данных для графика {title.toLowerCase()}.</p>;
   }
 
   const renderHistogram = (width: number, height: number) => {
+    if (!histogram.length) {
+      return null;
+    }
+    const maxValue = Math.max(...histogram.map((point) => point.value), 1);
     const barWidth = Math.max(10, Math.floor(width / Math.max(histogram.length, 1)) - 8);
     const labelStep = Math.max(1, Math.ceil(histogram.length / 12));
     return (
@@ -209,14 +268,57 @@ function DistributionChart({
     );
   };
 
+  const renderBoxplot = (width: number, height: number) => {
+    if (!stats) {
+      return null;
+    }
+
+    const padding = 56;
+    const axisY = Math.round(height / 2);
+    const usableWidth = Math.max(1, width - padding * 2);
+    const span = stats.max - stats.min || 1;
+    const scale = (value: number) => padding + ((value - stats.min) / span) * usableWidth;
+    const minX = scale(stats.min);
+    const q1X = scale(stats.q1);
+    const medianX = scale(stats.median);
+    const q3X = scale(stats.q3);
+    const maxX = scale(stats.max);
+
+    return (
+      <svg width="100%" height={height + 52} viewBox={`0 0 ${width} ${height + 52}`} role="img" aria-label={title}>
+        <rect x="0" y="0" width={width} height={height} fill="#f8fafc" stroke="#d7dde8" />
+        <line x1={padding} y1={axisY} x2={width - padding} y2={axisY} stroke="#4b5563" strokeWidth="1" />
+        <line x1={minX} y1={axisY} x2={q1X} y2={axisY} stroke="#2f6b9a" strokeWidth="3" />
+        <line x1={q3X} y1={axisY} x2={maxX} y2={axisY} stroke="#2f6b9a" strokeWidth="3" />
+        <rect x={q1X} y={axisY - 26} width={Math.max(4, q3X - q1X)} height={52} rx="5" fill="#2f6b9a" opacity="0.92" />
+        <line x1={medianX} y1={axisY - 26} x2={medianX} y2={axisY + 26} stroke="#ffffff" strokeWidth="2" />
+        <line x1={minX} y1={axisY - 12} x2={minX} y2={axisY + 12} stroke="#2f6b9a" strokeWidth="2" />
+        <line x1={maxX} y1={axisY - 12} x2={maxX} y2={axisY + 12} stroke="#2f6b9a" strokeWidth="2" />
+        {[
+          { x: minX, label: `min ${stats.min.toFixed(1)}` },
+          { x: q1X, label: `Q1 ${stats.q1.toFixed(1)}` },
+          { x: medianX, label: `median ${stats.median.toFixed(1)}` },
+          { x: q3X, label: `Q3 ${stats.q3.toFixed(1)}` },
+          { x: maxX, label: `max ${stats.max.toFixed(1)}` },
+        ].map((item) => (
+          <text key={item.label} x={item.x} y={height + 16} fontSize="10" textAnchor="middle" fill="#334155">
+            {item.label}
+          </text>
+        ))}
+      </svg>
+    );
+  };
+
+  const renderCurrentChart = (width: number, height: number) => (mode === "boxplot" ? renderBoxplot(width, height) : renderHistogram(width, height));
+
   return (
     <div className="chart-frame" title={title}>
       <div className="chart-toolbar">
         <strong>{title}</strong>
-        <div className="chart-toggle"><span>Гистограмма</span></div>
+        <div className="chart-toggle"><span>{mode === "boxplot" ? "Ящик с усами" : "Гистограмма"}</span></div>
       </div>
       <button className="chart-canvas-trigger" onClick={() => setExpanded(true)} title="Открыть график в большом виде">
-        {renderHistogram(980, 260)}
+        {renderCurrentChart(980, 260)}
       </button>
 
       {expanded ? (
@@ -227,7 +329,7 @@ function DistributionChart({
               <button className="modal-close" onClick={() => setExpanded(false)} aria-label="Закрыть">×</button>
             </div>
             <div className="chart-modal-body">
-              {renderHistogram(1600, 440)}
+              {renderCurrentChart(1600, 440)}
             </div>
           </section>
         </div>
@@ -248,9 +350,43 @@ function downloadBlob(filename: string, content: string, type: string) {
 
 function formatPreviewCell(value: unknown) {
   if (value === null || value === undefined || value === "") {
-    return "пусто";
+    return "Пусто";
   }
   return String(value);
+}
+
+function Formula({ latex }: { latex: string }) {
+  return (
+    <span
+      className="math-formula"
+      aria-label={latex}
+      dangerouslySetInnerHTML={{
+        __html: katex.renderToString(latex, { throwOnError: false, strict: "ignore", displayMode: false }),
+      }}
+    />
+  );
+}
+
+function CompactFormula({ children }: { children: ReactNode }) {
+  return <span className="compact-formula">{children}</span>;
+}
+
+function HelpTip({ text }: { text: ReactNode }) {
+  return (
+    <span className="help-tip">
+      <button type="button" className="help-tip-icon" aria-label="Пояснение">?</button>
+      <span className="help-tip-popup" role="tooltip">{text}</span>
+    </span>
+  );
+}
+
+function LabelWithTip({ label, tip }: { label: string; tip: ReactNode }) {
+  return (
+    <span className="label-with-tip">
+      <span>{label}</span>
+      <HelpTip text={tip} />
+    </span>
+  );
 }
 
 function criteriaDefaults(
@@ -273,13 +409,6 @@ function criteriaDefaults(
           : "maximize",
     scale_map: field.ordinal_map ?? field.binary_map,
   }));
-}
-
-function formatMetricValue(value: unknown) {
-  if (value === null || value === undefined) return "-";
-  if (Array.isArray(value)) return `${value.length} записей`;
-  if (typeof value === "object") return JSON.stringify(value);
-  return String(value);
 }
 
 const SUMMARY_LABELS: Record<string, string> = {
@@ -310,6 +439,21 @@ const SUMMARY_CARD_KEYS = [
   "target_object_id",
   "confidence_score",
 ];
+
+const SUMMARY_HELP_TEXTS: Record<string, ReactNode> = {
+  objects_count: "Количество объектов, включенных в расчет после фильтрации и предобработки.",
+  criteria_count: "Количество критериев, участвующих в итоговой агрегированной оценке.",
+  best_score: <><span>Максимальное значение интегрального показателя среди объектов.</span><Formula latex={"score = \\sum_{i=1}^{n} w_i \\cdot x_i^{norm}"} /></>,
+  mode: "Режим расчета: ранжирование всех объектов либо поиск ближайших аналогов для целевого объекта.",
+  target_object_id: "Идентификатор целевого объекта, относительно которого вычисляется мера близости аналогов.",
+  confidence_score: (
+    <>
+      <span>Интегральная оценка надежности результата в диапазоне [0;1].</span>
+      <Formula latex={"C = 1 - (aM + bO + cS)"} />
+      <span>где M — доля пропусков, O — доля выбросов, S — чувствительность ранжирования.</span>
+    </>
+  ),
+};
 
 const DIRECTION_LABELS: Record<string, string> = {
   maximize: "Максимизация",
@@ -403,6 +547,10 @@ function translateQualityText(value: string) {
 
 function labelForSummaryKey(key: string) {
   return SUMMARY_LABELS[key] ?? key.replace(/_/g, " ");
+}
+
+function summaryHelpText(key: string) {
+  return SUMMARY_HELP_TEXTS[key];
 }
 
 function formatDirection(value: string) {
@@ -653,20 +801,15 @@ function compactNumber(value: number) {
   return Number.isFinite(value) ? value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "") : "0";
 }
 
-function contributionLabel(value: unknown) {
-  const text = String(value ?? "-");
-  return text.length > 18 ? `${text.slice(0, 18)}...` : text;
-}
-
 function objectValueLabel(value: unknown) {
   if (value === null || value === undefined || value === "") {
-    return "пусто";
+    return "Пусто";
   }
   if (typeof value === "number") {
-    return Number.isFinite(value) ? compactNumber(value) : "пусто";
+    return Number.isFinite(value) ? compactNumber(value) : "Пусто";
   }
   if (typeof value === "boolean") {
-    return value ? "да" : "нет";
+    return value ? "Да" : "Нет";
   }
   return String(value);
 }
@@ -676,24 +819,33 @@ function ResultBarChart({
   mode,
   selectedId,
   onSelect,
-  onInspect,
+  currentPage,
+  onPageChange,
 }: {
   result: PipelineResult;
   mode: AnalysisMode;
   selectedId: string;
   onSelect: (objectId: string) => void;
-  onInspect: (objectId: string) => void;
+  currentPage: number;
+  onPageChange: (page: number) => void;
 }) {
-  const rows = result.ranking.slice(0, 10);
+  const pageSize = 8;
+  const totalPages = Math.max(1, Math.ceil(result.ranking.length / pageSize));
+  const safePage = Math.min(Math.max(1, currentPage), totalPages);
+  const pageStart = (safePage - 1) * pageSize;
+  const rows = result.ranking.slice(pageStart, pageStart + pageSize);
   const maxValue = Math.max(...rows.map((item) => chartValue(item, mode)), 0.0001);
   return (
     <div className="analytics-card wide-chart">
       <div className="chart-head">
         <div>
           <span className="section-kicker">Bar chart</span>
-          <h3>{mode === "analog_search" ? "Близость аналогов" : "Итоговые оценки"}</h3>
+          <h3>{mode === "analog_search" ? "Близость Аналогов" : "Итоговые Оценки"}</h3>
+          <p className="chart-subtitle">
+            Показаны Объекты {pageStart + 1}-{Math.min(pageStart + rows.length, result.ranking.length)} из {result.ranking.length}
+          </p>
         </div>
-        <small>Нажмите на столбец, чтобы разобрать объект</small>
+        <small>Нажмите на столбец, чтобы посмотреть объект ниже</small>
       </div>
       <div className="result-bars">
         {rows.map((item) => {
@@ -703,10 +855,7 @@ function ResultBarChart({
             <button
               className={`result-bar ${selectedId === item.object_id ? "active" : ""}`}
               key={item.object_id}
-              onClick={() => {
-                onSelect(item.object_id);
-                onInspect(item.object_id);
-              }}
+              onClick={() => onSelect(item.object_id)}
               title={`${item.title}: ${compactNumber(value)}`}
             >
               <span className="result-bar-rank">#{item.rank}</span>
@@ -719,206 +868,98 @@ function ResultBarChart({
           );
         })}
       </div>
+      {totalPages > 1 ? (
+        <div className="chart-pagination">
+          <button className="ghost-button" onClick={() => onPageChange(safePage - 1)} disabled={safePage <= 1}>
+            Назад
+          </button>
+          <div className="page-pills">
+            {Array.from({ length: totalPages }, (_, index) => index + 1)
+              .slice(Math.max(0, safePage - 3), Math.min(totalPages, safePage + 2))
+              .map((page) => (
+                <button
+                  key={page}
+                  className={`page-pill ${page === safePage ? "active" : ""}`}
+                  onClick={() => onPageChange(page)}
+                >
+                  {page}
+                </button>
+              ))}
+          </div>
+          <button className="ghost-button" onClick={() => onPageChange(safePage + 1)} disabled={safePage >= totalPages}>
+            Далее
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }
 
-function ObjectDetailsModal({
-  open,
-  onClose,
+function ObjectDetailsPanel({
   item,
-  row,
-  columns,
   mode,
 }: {
-  open: boolean;
-  onClose: () => void;
   item?: RankedItem;
-  row?: { id: string; values: Record<string, unknown> };
-  columns: PreviewColumn[];
   mode: AnalysisMode;
 }) {
-  if (!open || !item) return null;
-  const orderedColumns = columns.length ? columns : Object.keys(row?.values ?? {}).map((key) => ({ normalized_name: key } as PreviewColumn));
+  if (!item) {
+    return <p className="muted-note">Выберите объект на Bar Chart, чтобы увидеть подробности.</p>;
+  }
 
   return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
-      <section className="object-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
-        <div className="object-modal-head">
-          <div>
-            <span className="section-kicker">Карточка объекта</span>
-            <h2>{item.title}</h2>
-            <p>Подробные значения всех колонок для выбранного объекта.</p>
-          </div>
-          <button className="modal-close" onClick={onClose} aria-label="Закрыть">×</button>
+    <section className="analytics-card object-details-panel">
+      <div className="object-modal-head">
+        <div>
+          <span className="section-kicker">Выбранный объект</span>
+          <h3>{item.title}</h3>
+          <p>ID: {item.object_id}</p>
         </div>
+      </div>
 
-        <div className="object-meta-grid">
-          <div className="metric mini">
-            <span>ID</span>
-            <strong>{row?.id ?? item.object_id}</strong>
-          </div>
-          <div className="metric mini">
-            <span>Место</span>
-            <strong>#{item.rank}</strong>
-          </div>
-          <div className="metric mini">
-            <span>{mode === "analog_search" ? "Близость" : "Оценка"}</span>
-            <strong>
-              {mode === "analog_search" && item.similarity_to_target !== null && item.similarity_to_target !== undefined
-                ? item.similarity_to_target.toFixed(4)
-                : item.score.toFixed(4)}
-            </strong>
-          </div>
+      <div className="object-meta-grid">
+        <div className="metric mini">
+          <span>Место</span>
+          <strong>#{item.rank}</strong>
         </div>
-
-        <div className="object-values-panel">
-          {orderedColumns.map((column) => {
-            const key = column.normalized_name;
-            const value = row?.values?.[key];
-            return (
-              <div className="object-value-row" key={key}>
-                <span>{key}</span>
-                <strong title={objectValueLabel(value)}>{objectValueLabel(value)}</strong>
-              </div>
-            );
-          })}
+        <div className="metric mini">
+          <span>
+            <LabelWithTip
+              label={mode === "analog_search" ? "Близость" : "Оценка"}
+              tip={
+                mode === "analog_search"
+                  ? "Мера сходства объекта с целевым по совокупности критериев и весов (диапазон [0;1], где 1 — максимальная близость)."
+                  : <><span>Интегральная оценка объекта:</span><Formula latex={"score = \\sum_{i=1}^{n} w_i \\cdot x_i^{norm}"} /></>
+              }
+            />
+          </span>
+          <strong>
+            {mode === "analog_search" && item.similarity_to_target !== null && item.similarity_to_target !== undefined
+              ? item.similarity_to_target.toFixed(4)
+              : item.score.toFixed(4)}
+          </strong>
         </div>
+      </div>
 
-        <div className="object-notes-grid">
-          <div className="object-notes-card">
-            <span className="section-kicker">Объяснение</span>
-            <p>{translateAnalysisText(item.explanation)}</p>
+      <div className="object-contributions-card">
+        <span className="section-kicker">Критерии и вклады</span>
+        <div className="object-contributions-table">
+          <div className="object-contributions-head">
+            <span><LabelWithTip label="Критерий" tip="Показатель, используемый для сравнительного анализа объектов." /></span>
+            <span><LabelWithTip label="Значение" tip="Исходное наблюдаемое значение показателя для выбранного объекта." /></span>
+            <span><LabelWithTip label="Нормализованное" tip="Преобразованное значение показателя в единой шкале для сопоставимости критериев." /></span>
+            <span><LabelWithTip label="Вклад" tip={<><span>Компонент итогового балла по критерию:</span><Formula latex={"contribution_i = w_i \\cdot x_i^{norm}"} /></>} /></span>
           </div>
-          <div className="object-notes-card">
-            <span className="section-kicker">Вклады</span>
-            <div className="object-contributions">
-              {item.contributions.map((contribution) => (
-                <div className="object-contribution" key={contribution.key}>
-                  <span>{contribution.name}</span>
-                  <strong>{contribution.contribution.toFixed(3)}</strong>
-                </div>
-              ))}
+          {item.contributions.map((contribution) => (
+            <div className="object-contributions-row" key={contribution.key}>
+              <strong>{contribution.name}</strong>
+              <span title={objectValueLabel(contribution.raw_value)}>{objectValueLabel(contribution.raw_value)}</span>
+              <span>{compactNumber(contribution.normalized_value)}</span>
+              <span>{contribution.contribution.toFixed(3)}</span>
             </div>
-          </div>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function RadarChart({ baseline, selected }: { baseline?: RankedItem; selected?: RankedItem }) {
-  const source = selected ?? baseline;
-  const contributions = source?.contributions.slice(0, 8) ?? [];
-  const count = contributions.length;
-  const center = 150;
-  const radius = 104;
-  const levels = [0.25, 0.5, 0.75, 1];
-  const angleFor = (index: number) => (Math.PI * 2 * index) / Math.max(count, 1) - Math.PI / 2;
-  const pointFor = (value: number, index: number) => {
-    const angle = angleFor(index);
-    const safeValue = Math.max(0, Math.min(1, value));
-    return {
-      x: center + Math.cos(angle) * radius * safeValue,
-      y: center + Math.sin(angle) * radius * safeValue,
-    };
-  };
-  const polygonFor = (item?: RankedItem) =>
-    item?.contributions
-      .slice(0, count)
-      .map((contribution, index) => {
-        const point = pointFor(contribution.normalized_value, index);
-        return `${point.x},${point.y}`;
-      })
-      .join(" ") ?? "";
-
-  return (
-    <div className="analytics-card radar-card">
-      <div className="chart-head">
-        <div>
-          <span className="section-kicker">Radar chart</span>
-          <h3>Профиль критериев</h3>
+          ))}
         </div>
       </div>
-      {count ? (
-        <>
-          <svg className="radar-svg" viewBox="0 0 300 300" role="img" aria-label="Профиль критериев">
-            {levels.map((level) => (
-              <polygon
-                key={level}
-                points={contributions.map((_, index) => {
-                  const point = pointFor(level, index);
-                  return `${point.x},${point.y}`;
-                }).join(" ")}
-                className="radar-grid"
-              />
-            ))}
-            {contributions.map((contribution, index) => {
-              const edge = pointFor(1, index);
-              const label = pointFor(1.18, index);
-              return (
-                <g key={contribution.key}>
-                  <line x1={center} y1={center} x2={edge.x} y2={edge.y} className="radar-axis" />
-                  <text x={label.x} y={label.y} textAnchor="middle" dominantBaseline="middle">
-                    {contributionLabel(contribution.name)}
-                  </text>
-                </g>
-              );
-            })}
-            {baseline && <polygon points={polygonFor(baseline)} className="radar-shape baseline" />}
-            {selected && <polygon points={polygonFor(selected)} className="radar-shape selected" />}
-          </svg>
-          <div className="chart-legend">
-            <span><i className="legend-dot baseline" />Лидер</span>
-            <span><i className="legend-dot selected" />Выбранный объект</span>
-          </div>
-        </>
-      ) : (
-        <p>Нет данных по критериям для построения профиля.</p>
-      )}
-    </div>
-  );
-}
-
-function ContributionWaterfall({ item }: { item?: RankedItem }) {
-  const contributions = item?.contributions ?? [];
-  const total = contributions.reduce((sum, contribution) => sum + Math.max(0, contribution.contribution), 0);
-  let cumulative = 0;
-  return (
-    <div className="analytics-card waterfall-card">
-      <div className="chart-head">
-        <div>
-          <span className="section-kicker">Waterfall</span>
-          <h3>Вклад критериев</h3>
-        </div>
-        {item ? <small>{item.title}</small> : null}
-      </div>
-      {item && contributions.length ? (
-        <div className="waterfall-list">
-          {contributions.map((contribution) => {
-            const value = Math.max(0, contribution.contribution);
-            const left = total > 0 ? (cumulative / total) * 100 : 0;
-            const width = total > 0 ? Math.max(2, (value / total) * 100) : 0;
-            cumulative += value;
-            return (
-              <div className="waterfall-row" key={contribution.key} title={`${contribution.name}: ${compactNumber(value)}`}>
-                <span>{contribution.name}</span>
-                <div className="waterfall-track">
-                  <i style={{ left: `${left}%`, width: `${width}%` }} />
-                </div>
-                <strong>{compactNumber(value)}</strong>
-              </div>
-            );
-          })}
-          <div className="waterfall-total">
-            <span>Итоговая сумма вкладов</span>
-            <strong>{compactNumber(total)}</strong>
-          </div>
-        </div>
-      ) : (
-        <p>Выберите объект на диаграмме рейтинга, чтобы увидеть вклад критериев.</p>
-      )}
-    </div>
+    </section>
   );
 }
 
@@ -968,10 +1009,12 @@ export function App() {
   const [targetRowId, setTargetRowId] = useState(savedWorkflow.targetRowId ?? "");
   const [result, setResult] = useState<PipelineResult | null>(savedWorkflow.result ?? null);
   const [selectedResultId, setSelectedResultId] = useState(savedWorkflow.result?.ranking?.[0]?.object_id ?? "");
-  const [inspectedObjectId, setInspectedObjectId] = useState<string | null>(null);
+  const [resultsPage, setResultsPage] = useState(1);
   const [lastHistoryId, setLastHistoryId] = useState<number | null>(savedWorkflow.lastHistoryId ?? null);
   const [preprocessingSection, setPreprocessingSection] = useState<PrepSectionId>(savedWorkflow.preprocessingSection === "selection" ? "types" : savedWorkflow.preprocessingSection ?? "types");
   const [histogramBinsByField, setHistogramBinsByField] = useState<Record<string, number>>(savedWorkflow.histogramBinsByField ?? {});
+  const [histogramDraftBinsByField, setHistogramDraftBinsByField] = useState<Record<string, number>>(savedWorkflow.histogramBinsByField ?? {});
+  const [chartModeByField, setChartModeByField] = useState<Record<string, ChartMode>>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [applyingSection, setApplyingSection] = useState<PrepSectionId | null>(null);
@@ -1000,18 +1043,6 @@ export function App() {
   const selectedResult = useMemo(
     () => result?.ranking.find((item) => item.object_id === selectedResultId) ?? result?.ranking[0],
     [result, selectedResultId],
-  );
-  const datasetRowById = useMemo(() => {
-    const rows = preview?.normalized_dataset?.rows ?? [];
-    return new Map(rows.map((row) => [row.id, row] as const));
-  }, [preview]);
-  const inspectedResult = useMemo(
-    () => result?.ranking.find((item) => item.object_id === inspectedObjectId) ?? null,
-    [result, inspectedObjectId],
-  );
-  const inspectedRow = useMemo(
-    () => (inspectedObjectId ? datasetRowById.get(inspectedObjectId) : undefined),
-    [datasetRowById, inspectedObjectId],
   );
   const activeProjectLatestHistory = useMemo(() => {
     if (!activeProjectId) return null;
@@ -1069,6 +1100,13 @@ export function App() {
     updateField(index, { normalization });
   }
 
+  function applyHistogramBins(fieldKey: string) {
+    setHistogramBinsByField((current) => {
+      const nextValue = Math.min(64, Math.max(2, histogramDraftBinsByField[fieldKey] ?? current[fieldKey] ?? 8));
+      return { ...current, [fieldKey]: nextValue };
+    });
+  }
+
   const visibleStages = user?.role === "admin" ? stages : stages.filter((stage) => stage.id !== "admin");
 
   function persistAuth(nextToken: string, nextUser: AuthUser) {
@@ -1109,13 +1147,16 @@ export function App() {
     setTargetRowId("");
     setResult(null);
     setSelectedResultId("");
-    setInspectedObjectId(null);
+    setResultsPage(1);
     setLastHistoryId(null);
     setActiveProjectId(null);
     setHistoryProjectFilter("all");
     setHistoryCompareIds([]);
     setScenarioTitle("Сценарий сравнительного анализа");
     setPreprocessingSection("types");
+    setHistogramBinsByField({});
+    setHistogramDraftBinsByField({});
+    setChartModeByField({});
     setReportPreviewOpen(false);
     setError(null);
     localStorage.removeItem(WORKFLOW_STORAGE_KEY);
@@ -1185,6 +1226,13 @@ export function App() {
       setSelectedResultId(result.ranking[0].object_id);
     }
   }, [result, selectedResultId]);
+
+  useEffect(() => {
+    const totalPages = Math.max(1, Math.ceil((result?.ranking.length ?? 0) / 8));
+    if (resultsPage > totalPages) {
+      setResultsPage(totalPages);
+    }
+  }, [result, resultsPage]);
 
   useEffect(() => {
     const state: SavedWorkflowState = {
@@ -1297,7 +1345,6 @@ export function App() {
     setError(null);
     setResult(null);
     setSelectedResultId("");
-    setInspectedObjectId(null);
     if (!projectId || !user) {
       setFile(null);
       setDatasetFileId(null);
@@ -1342,6 +1389,12 @@ export function App() {
         setTargetRowId("");
         setLastHistoryId(null);
         setScenarioTitle("Сценарий сравнительного анализа");
+        setHistogramBinsByField({});
+        setHistogramDraftBinsByField({});
+        setChartModeByField({});
+        setHistogramBinsByField({});
+        setHistogramDraftBinsByField({});
+        setChartModeByField({});
         return;
       }
 
@@ -1379,6 +1432,9 @@ export function App() {
         setWeightNotes(response.profile.weight_notes);
         setMissingMatrixPreview(response.profile.missing_matrix_preview ?? []);
         setCorrelationMatrix(response.profile.correlation_matrix ?? []);
+        setHistogramBinsByField(nextHistogramBinsByField);
+        setHistogramDraftBinsByField(nextHistogramBinsByField);
+        setChartModeByField({});
       } else {
         setPreview(null);
         setProfile([]);
@@ -1387,6 +1443,9 @@ export function App() {
         setWeightNotes([]);
         setMissingMatrixPreview([]);
         setCorrelationMatrix([]);
+        setHistogramBinsByField({});
+        setHistogramDraftBinsByField({});
+        setChartModeByField({});
       }
     } catch (selectionError) {
       setError(selectionError instanceof Error ? selectionError.message : "Не удалось загрузить настройки проекта");
@@ -1460,6 +1519,14 @@ export function App() {
       setCorrelationMatrix(response.profile.correlation_matrix ?? []);
       setFields(inferredFields);
       setCriteria(criteriaDefaults(inferredFields, response.profile.recommended_weights, analysisMode));
+      const nextHistogramBinsByField = Object.fromEntries(
+        response.profile.fields
+          .filter((field) => field.inferred_type === "numeric")
+          .map((field) => [field.key, Math.min(64, Math.max(2, histogramBinsByField[field.key] ?? 8))]),
+      );
+      setHistogramBinsByField(nextHistogramBinsByField);
+      setHistogramDraftBinsByField(nextHistogramBinsByField);
+      setChartModeByField({});
       const firstRowId = response.preview.normalized_dataset?.rows?.[0]?.id ?? "";
       setTargetRowId(firstRowId);
     } catch (previewError) {
@@ -1492,7 +1559,7 @@ export function App() {
       );
       setResult(response);
       setSelectedResultId(response.ranking[0]?.object_id ?? "");
-      setInspectedObjectId(null);
+      setResultsPage(1);
       setLastHistoryId(response.history_id ?? null);
       setActiveStage("results");
       if (user) {
@@ -1606,6 +1673,18 @@ export function App() {
         weight: recommendedWeights[item.key] ?? item.weight,
       })),
     );
+  }
+
+  function changeResultsPage(page: number) {
+    if (!result) return;
+    const totalPages = Math.max(1, Math.ceil(result.ranking.length / 8));
+    const nextPage = Math.min(Math.max(1, page), totalPages);
+    setResultsPage(nextPage);
+    const pageStart = (nextPage - 1) * 8;
+    const pageItem = result.ranking[pageStart];
+    if (pageItem) {
+      setSelectedResultId(pageItem.object_id);
+    }
   }
 
   function rebuildCriteria() {
@@ -1742,7 +1821,7 @@ export function App() {
           <div className="brand-mark">CA</div>
           <div>
             <strong>CompareLab</strong>
-            <span>аналитическая система</span>
+            <span>Аналитическая Система</span>
           </div>
         </div>
 
@@ -1784,7 +1863,7 @@ export function App() {
                   <span className="avatar">{user.full_name.slice(0, 1).toUpperCase()}</span>
                   <span className="user-meta">
                     <strong>{user.full_name}</strong>
-                    <span>{user.role === "admin" ? "администратор" : "пользователь"}</span>
+                    <span>{user.role === "admin" ? "Администратор" : "Пользователь"}</span>
                   </span>
                   <span className="menu-caret">▾</span>
                 </button>
@@ -1926,7 +2005,7 @@ export function App() {
                             {preview.columns.map((column) => (
                               <td key={`${rowIndex}-${column.normalized_name}`}>
                                 {row[column.normalized_name] === null || row[column.normalized_name] === ""
-                                  ? <span className="muted-cell">пусто</span>
+                                  ? <span className="muted-cell">Пусто</span>
                                   : String(row[column.normalized_name])}
                               </td>
                             ))}
@@ -1995,16 +2074,27 @@ export function App() {
                 {quality ? (
                   <div className={`quality-card ${quality.level}`}>
                     <div className="quality-score">
-                      <span>Индекс качества датасета</span>
+                      <span>
+                        <LabelWithTip
+                          label="Индекс качества датасета"
+                          tip={
+                            <>
+                              <span>Интегральная оценка готовности данных к сравнению.</span>
+                              <Formula latex={"Q = 100 - (P_{missing} + P_{outliers} + P_{structure})"} />
+                              <span>где P-параметры представляют штрафы за пропуски, выбросы и структурные ограничения датасета.</span>
+                            </>
+                          }
+                        />
+                      </span>
                       <strong>{quality.score.toFixed(0)}</strong>
                       <small>{translateQualityText(quality.readiness_label)}</small>
                     </div>
                     <div className="quality-body">
                       <div className="quality-metrics">
-                        <div><span>Аналитических полей</span><strong>{quality.analytic_fields_count}</strong></div>
-                        <div><span>Пропусков</span><strong>{quality.total_missing_values}</strong></div>
-                        <div><span>Выбросов IQR</span><strong>{fullDatasetOutlierTotal}</strong></div>
-                        <div><span>Текстовых полей</span><strong>{quality.text_fields_count}</strong></div>
+                        <div><span><LabelWithTip label="Аналитических полей" tip="Количество полей, признанных пригодными для количественного сравнительного анализа." /></span><strong>{quality.analytic_fields_count}</strong></div>
+                        <div><span><LabelWithTip label="Пропусков" tip="Суммарное количество отсутствующих значений в текущем наборе данных." /></span><strong>{quality.total_missing_values}</strong></div>
+                        <div><span><LabelWithTip label="Выбросов IQR" tip={<><span>Количество наблюдений за границами межквартильного правила:</span><CompactFormula>x &lt; Q<sub>1</sub> - 1.5·IQR</CompactFormula><CompactFormula>x &gt; Q<sub>3</sub> + 1.5·IQR</CompactFormula><CompactFormula>IQR = Q<sub>3</sub> - Q<sub>1</sub></CompactFormula></>} /></span><strong>{fullDatasetOutlierTotal}</strong></div>
+                        <div><span><LabelWithTip label="Текстовых полей" tip="Количество полей свободного текста, которые обычно имеют ограниченную пригодность для прямой числовой агрегации." /></span><strong>{quality.text_fields_count}</strong></div>
                       </div>
                     </div>
                   </div>
@@ -2029,7 +2119,7 @@ export function App() {
                         {applyingSection === "types" ? "Применяем..." : "Применить"}
                       </button>
                     </div>
-                    <div className="table-wrap compact">
+                    <div className="table-wrap compact flow-table">
                       <table>
                         <thead>
                           <tr>
@@ -2113,7 +2203,10 @@ export function App() {
                               ) : null}
                               <div className="control-grid">
                                 <label>
-                                  Энкодинг
+                                  <LabelWithTip
+                                    label="Энкодинг"
+                                    tip="Метод кодирования категориальных признаков в числовое представление для последующего расчета метрик и ранжирования."
+                                  />
                                   <select
                                     value={field.encoding}
                                     disabled={disabled}
@@ -2159,7 +2252,10 @@ export function App() {
                               </div>
                               <div className="control-grid">
                                 <label>
-                                  Масштабирование
+                                  <LabelWithTip
+                                    label="Масштабирование"
+                                    tip="Нормализация числовых признаков к сопоставимому масштабу, чтобы исключить непропорциональное влияние признаков с крупными абсолютными значениями."
+                                  />
                                   <select
                                     value={field.normalization}
                                     disabled={disabled}
@@ -2211,7 +2307,7 @@ export function App() {
                                   const isMissing = value === null || value === undefined || value === "";
                                   return (
                                     <td key={`${row.id}-${column.normalized_name}`}>
-                                      {isMissing ? <span className="muted-cell">пусто</span> : formatPreviewCell(value)}
+                                      {isMissing ? <span className="muted-cell">Пусто</span> : formatPreviewCell(value)}
                                     </td>
                                   );
                                 })}
@@ -2239,7 +2335,10 @@ export function App() {
                               </div>
                               <div className="control-grid">
                                 <label>
-                                  Что делать с пропусками
+                                  <LabelWithTip
+                                    label="Что делать с пропусками"
+                                    tip="Политика обработки отсутствующих значений: исключение наблюдений, статистическая импутация или подстановка фиксированной константы."
+                                  />
                                   <select value={field.missing_strategy} onChange={(event) => updateField(index, { missing_strategy: event.target.value })}>
                                     <option value="none">{methodLabel("none")}</option>
                                     <option value="drop_row">{methodLabel("drop_row")}</option>
@@ -2271,7 +2370,7 @@ export function App() {
                   <>
                     <div className="prep-section-head">
                       <p>Настройте обработку выбросов и примените, чтобы пересчитать графики и итоговый профиль.</p>
-                      <button onClick={() => applyPreprocessingSection("outliers")} disabled={loading || !datasetFileId}>
+                      <button className="ghost-button" onClick={() => applyPreprocessingSection("outliers")} disabled={loading || !datasetFileId}>
                         {applyingSection === "outliers" ? "Применяем..." : "Применить"}
                       </button>
                     </div>
@@ -2281,6 +2380,9 @@ export function App() {
                         .map((field) => {
                           const index = fields.findIndex((item) => item.key === field.key);
                           const fieldProfile = profile.find((item) => item.key === field.key);
+                          const values = numericValuesForField(preview, field.key);
+                          const currentMode = chartModeByField[field.key] ?? "histogram";
+                          const appliedBins = histogramBinsByField[field.key] ?? 8;
                           const outliersCount = fieldProfile?.outlier_count_iqr ?? 0;
                           return (
                             <article className="field-card" key={field.key}>
@@ -2289,30 +2391,54 @@ export function App() {
                                   <strong>{field.key}</strong>
                                   <span>Найдено выбросов: {outliersCount}</span>
                                 </div>
+                                <div className="chart-mode-switch">
+                                  <button
+                                    className={`ghost-button compact ${currentMode === "histogram" ? "active" : ""}`}
+                                    type="button"
+                                    onClick={() => setChartModeByField((current) => ({ ...current, [field.key]: "histogram" }))}
+                                  >
+                                    Гистограмма
+                                  </button>
+                                  <button
+                                    className={`ghost-button compact ${currentMode === "boxplot" ? "active" : ""}`}
+                                    type="button"
+                                    onClick={() => setChartModeByField((current) => ({ ...current, [field.key]: "boxplot" }))}
+                                  >
+                                    Ящик с усами
+                                  </button>
+                                </div>
                               </div>
-                              <DistributionChart
-                                title={`Распределение ${field.key}`}
-                                fieldProfile={fieldProfile}
-                              />
+                              <DistributionChart title={`Распределение ${field.key}`} values={values} bins={appliedBins} mode={currentMode} />
                               <div className="control-grid">
+                                {currentMode === "histogram" ? (
+                                  <label>
+                                    <LabelWithTip
+                                      label="Столбцов гистограммы"
+                                      tip="Число интервалов разбиения признака для оценки распределения. Увеличение числа интервалов повышает детализацию и чувствительность к шуму."
+                                    />
+                                    <input
+                                      type="number"
+                                      min={2}
+                                      max={64}
+                                      step="1"
+                                      value={histogramDraftBinsByField[field.key] ?? histogramBinsByField[field.key] ?? 8}
+                                      onChange={(event) =>
+                                        setHistogramDraftBinsByField((current) => ({
+                                          ...current,
+                                          [field.key]: Math.min(64, Math.max(2, Number(event.target.value) || 8)),
+                                        }))
+                                      }
+                                    />
+                                  </label>
+                                ) : null}
+                                <button className="chart-redraw-button" type="button" onClick={() => applyHistogramBins(field.key)} disabled={loading}>
+                                  Перерисовать график
+                                </button>
                                 <label>
-                                  Столбцов гистограммы
-                                  <input
-                                    type="number"
-                                    min={2}
-                                    max={64}
-                                    step="1"
-                                    value={histogramBinsByField[field.key] ?? 8}
-                                    onChange={(event) =>
-                                      setHistogramBinsByField((current) => ({
-                                        ...current,
-                                        [field.key]: Math.min(64, Math.max(2, Number(event.target.value) || 8)),
-                                      }))
-                                    }
+                                  <LabelWithTip
+                                    label="Что делать с выбросами"
+                                    tip="Стратегия обработки экстремальных наблюдений: ограничение значений до порогов либо исключение соответствующих записей."
                                   />
-                                </label>
-                                <label>
-                                  Что делать с выбросами
                                   <select value={field.outlier_method} onChange={(event) => updateField(index, { outlier_method: event.target.value })}>
                                     <option value="none">{methodLabel("none")}</option>
                                     <option value="iqr_clip">{methodLabel("iqr_clip")}</option>
@@ -2322,7 +2448,10 @@ export function App() {
                                   </select>
                                 </label>
                                 <label>
-                                  Порог
+                                  <LabelWithTip
+                                    label="Порог"
+                                    tip="Параметр чувствительности правила обнаружения выбросов; снижение порога увеличивает число наблюдений, классифицируемых как выбросы."
+                                  />
                                   <input
                                     type="number"
                                     min={0}
@@ -2359,7 +2488,7 @@ export function App() {
               {criteria.length > 0 ? (
                 <div className="criteria-actions">
                   <div className="weight-meter">
-                    <span>Σ весов</span>
+                    <span><LabelWithTip label="Σ весов" tip={<><span>Сумма весов критериев в нормализованной постановке:</span><Formula latex={"\\sum_{i=1}^{n} w_i = 1"} /></>} /></span>
                     <strong>{totalWeight.toFixed(3)}</strong>
                   </div>
                   <button className="ghost-button" onClick={setEqualWeights} disabled={criteria.length === 0}>
@@ -2377,7 +2506,10 @@ export function App() {
 
             <div className="target-panel focus-target-panel">
               <label>
-                Режим анализа
+                <LabelWithTip
+                  label="Режим анализа"
+                  tip="Определяет постановку задачи: глобальное ранжирование всей выборки либо оценка близости объектов к выбранному эталону."
+                />
                 <select value={analysisMode} onChange={(event) => setAnalysisMode(event.target.value as AnalysisMode)}>
                   <option value="analog_search">Поиск аналогов для целевого объекта</option>
                   <option value="rating">Общий рейтинг объектов</option>
@@ -2434,7 +2566,10 @@ export function App() {
                       />
                     </div>
                     <label>
-                      Направление
+                      <LabelWithTip
+                        label="Направление"
+                        tip="Правило монотонности критерия: максимизация, минимизация либо минимизация отклонения от целевого значения."
+                      />
                       <select
                         value={criterion.direction}
                         onChange={(event) => updateCriterion(index, { direction: event.target.value as CriterionConfig["direction"] })}
@@ -2478,38 +2613,14 @@ export function App() {
               {result ? (
                 <>
                   <div className="metric-row">
-                    {summaryCardEntries(result.analysis_summary).map(([key, value]) => (
+                    {summaryCardEntries(result.analysis_summary).filter(([key]) => key !== "weights_sum").map(([key, value]) => (
                       <div className="metric" key={key}>
-                        <span>{labelForSummaryKey(key)}</span>
+                        <span>{summaryHelpText(key) ? <LabelWithTip label={labelForSummaryKey(key)} tip={summaryHelpText(key)} /> : labelForSummaryKey(key)}</span>
                         <strong>{formatSummaryValue(key, value)}</strong>
                       </div>
                     ))}
                   </div>
-                  <div className="analytics-grid">
-                    <ResultBarChart
-                      result={result}
-                      mode={analysisMode}
-                      selectedId={selectedResult?.object_id ?? ""}
-                      onSelect={setSelectedResultId}
-                      onInspect={setInspectedObjectId}
-                    />
-                    <RadarChart baseline={result.ranking[0]} selected={selectedResult} />
-                    <ContributionWaterfall item={selectedResult} />
-                  </div>
                   <div className="insight-grid">
-                    <div className="insight-card">
-                      <span className="section-kicker">Объяснимость</span>
-                      <h3>Чувствительность критериев</h3>
-                      {summaryList<{ key: string; name: string; sensitivity_index: number; note: string }>(result.analysis_summary, "sensitivity")
-                        .slice(0, 4)
-                        .map((item) => (
-                          <div className="insight-row" key={item.key}>
-                            <span>{item.name}</span>
-                            <strong>{Number(item.sensitivity_index).toFixed(4)}</strong>
-                            <small>{translateAnalysisText(item.note)}</small>
-                          </div>
-                        ))}
-                    </div>
                     <div className="insight-card">
                       <span className="section-kicker">Надежность</span>
                       <h3>Доверие и устойчивость</h3>
@@ -2533,7 +2644,7 @@ export function App() {
                         summaryList<{ label: string; object_ids: string[] }>(result.analysis_summary, "analog_groups").map((group) => (
                           <div className="group-chip" key={group.label}>
                             <strong>{translateAnalysisText(group.label)}</strong>
-                            <span>{group.object_ids.length} объектов</span>
+                            <span>{group.object_ids.length} Объектов</span>
                           </div>
                         ))
                       ) : (
@@ -2541,35 +2652,17 @@ export function App() {
                       )}
                     </div>
                   </div>
-                  <div className="ranking-table">
-                    {result.ranking.map((item) => (
-                      <article className="result-card" key={item.object_id}>
-                        <div className="result-rank">#{item.rank}</div>
-                        <div className="result-body">
-                          <div className="result-title">
-                            <h3>{item.title}</h3>
-                            <strong>
-                              {analysisMode === "analog_search" && item.similarity_to_target !== null && item.similarity_to_target !== undefined
-                                ? item.similarity_to_target.toFixed(4)
-                                : item.score.toFixed(4)}
-                            </strong>
-                          </div>
-                          <p>{translateAnalysisText(item.explanation)}</p>
-                          <div className="bar-list">
-                            {item.contributions.map((contribution) => (
-                              <div className="bar-item" key={contribution.key}>
-                                <span>{contribution.name}</span>
-                                <div className="bar-track">
-                                  <div className="bar-fill" style={{ width: `${Math.max(4, contribution.contribution * 100)}%` }} />
-                                </div>
-                                <strong>{contribution.contribution.toFixed(3)}</strong>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      </article>
-                    ))}
+                  <div className="analytics-grid">
+                    <ResultBarChart
+                      result={result}
+                      mode={analysisMode}
+                      selectedId={selectedResult?.object_id ?? ""}
+                      onSelect={setSelectedResultId}
+                      currentPage={resultsPage}
+                      onPageChange={changeResultsPage}
+                    />
                   </div>
+                  <ObjectDetailsPanel item={selectedResult} mode={analysisMode} />
                 </>
               ) : (
                 <div className="empty-state">
@@ -2579,15 +2672,6 @@ export function App() {
             </div>
           </section>
         ) : null}
-
-        <ObjectDetailsModal
-          open={Boolean(inspectedResult)}
-          onClose={() => setInspectedObjectId(null)}
-          item={inspectedResult ?? undefined}
-          row={inspectedRow}
-          columns={preview?.columns ?? []}
-          mode={analysisMode}
-        />
 
         {activeStage === "projects" ? (
           <section className="panel">
@@ -2707,14 +2791,14 @@ export function App() {
                             <strong>{summaryNumber(summary, "best_score").toFixed(4)}</strong>
                           </div>
                           <div className="metric mini">
-                            <span>Confidence</span>
+                            <span><LabelWithTip label="Confidence" tip={<><span>Оценка статистической устойчивости результата:</span><Formula latex={"C = 1 - (aM + bO + cS)"} /></>} /></span>
                             <strong>{summaryNumber(summary, "confidence_score").toFixed(4)}</strong>
                           </div>
                         </div>
                       );
                     })}
                     <div className="compare-delta">
-                      <span>Δ лучшей оценки</span>
+                      <span><LabelWithTip label="Δ лучшей оценки" tip={<><span>Разность максимальных интегральных оценок двух сценариев:</span><Formula latex={"\\Delta = best\\_score_{new} - best\\_score_{old}"} /></>} /></span>
                       <strong>
                         {(summaryNumber(parseHistorySummary(comparedHistory[1]), "best_score") -
                           summaryNumber(parseHistorySummary(comparedHistory[0]), "best_score")).toFixed(4)}
@@ -2739,7 +2823,7 @@ export function App() {
                         </div>
                         <div className="metric mini">
                           <span>Файлы</span>
-                          <strong>{item.dataset_file_id && item.result_file_id ? "файловое хранилище" : "только БД"}</strong>
+                          <strong>{item.dataset_file_id && item.result_file_id ? "Файловое Хранилище" : "Только БД"}</strong>
                         </div>
                         <div className="metric mini">
                           <span>Лучший объект</span>
@@ -2815,7 +2899,7 @@ export function App() {
                           <td>{item.email}</td>
                           <td>{item.full_name}</td>
                           <td><span className="tag">{item.role}</span></td>
-                          <td>{item.is_active ? "активен" : "заблокирован"}</td>
+                          <td>{item.is_active ? "Активен" : "Заблокирован"}</td>
                         </tr>
                       ))}
                     </tbody>

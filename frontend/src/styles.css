@@ -233,6 +233,10 @@ p {
   min-height: 100vh;
 }
 
+.app-shell > * {
+  min-width: 0;
+}
+
 .sidebar {
   position: sticky;
   align-self: start;
@@ -351,6 +355,7 @@ p {
 
 .workspace {
   padding: 28px;
+  min-width: 0;
 }
 
 .topbar {
@@ -539,9 +544,17 @@ p {
   gap: 22px;
 }
 
+.stage-grid > * {
+  min-width: 0;
+}
+
 .data-stage {
   display: grid;
   gap: 22px;
+}
+
+.data-stage > * {
+  min-width: 0;
 }
 
 .hero-panel {
@@ -666,6 +679,7 @@ p {
 
 .table-wrap {
   width: 100%;
+  max-width: 100%;
   overflow: auto;
 }
 

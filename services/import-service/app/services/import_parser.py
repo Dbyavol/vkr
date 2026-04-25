@@ -68,8 +68,23 @@ def _records_from_bytes(filename: str, body: bytes) -> list[dict[str, Any]]:
     if lower_name.endswith(".xlsx"):
         return pd.read_excel(io.BytesIO(body)).to_dict(orient="records")
     if lower_name.endswith(".csv"):
-        text = body.decode("utf-8-sig")
-        return list(csv.DictReader(io.StringIO(text)))
+        try:
+            text = body.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            # Many Russian public datasets are exported in cp1251.
+            text = body.decode("cp1251")
+
+        sample = text[:4096]
+        delimiters = [",", ";", "\t", "|"]
+        delimiter = ","
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=delimiters)
+            delimiter = dialect.delimiter
+        except csv.Error:
+            first_line = text.splitlines()[0] if text else ""
+            delimiter = max(delimiters, key=first_line.count)
+
+        return list(csv.DictReader(io.StringIO(text), delimiter=delimiter))
     raise ValueError("Supported file types: CSV, XLSX, JSON")
 
 

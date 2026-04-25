@@ -342,6 +342,16 @@ def _prepare_criteria_for_analysis(
     return prepared
 
 
+def _sanitize_fields_for_preprocessing(fields: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    sanitized: list[dict[str, Any]] = []
+    for field in fields:
+        item = dict(field)
+        if item.get("missing_strategy") == "constant" and item.get("missing_constant") is None:
+            item["missing_constant"] = 0 if item.get("field_type") == "numeric" else "unknown"
+        sanitized.append(item)
+    return sanitized
+
+
 async def run_pipeline_via_services(
     *,
     settings: Settings,
@@ -353,6 +363,7 @@ async def run_pipeline_via_services(
 ) -> PipelineRunResponse:
     user = await fetch_current_user(settings, authorization)
     preview = await fetch_preview(settings=settings, filename=filename, body=body)
+    fields_payload = _sanitize_fields_for_preprocessing([field.model_dump() for field in payload.config.fields])
     title_by_id = {
         row["id"]: _object_title(row)
         for row in preview["normalized_dataset"]["rows"]
@@ -360,7 +371,7 @@ async def run_pipeline_via_services(
     preprocessing = await preprocess_dataset(
         settings=settings,
         rows=preview["normalized_dataset"]["rows"],
-        fields=[field.model_dump() for field in payload.config.fields],
+        fields=fields_payload,
     )
     processed_rows = [
         {
@@ -375,7 +386,7 @@ async def run_pipeline_via_services(
         rows=processed_rows,
         criteria=_prepare_criteria_for_analysis(
             [criterion.model_dump() for criterion in payload.config.criteria],
-            [field.model_dump() for field in payload.config.fields],
+            fields_payload,
         ),
         target_row_id=payload.config.target_row_id,
         mode=payload.config.analysis_mode,
@@ -497,7 +508,7 @@ async def refresh_preprocessing_from_storage(
     preprocessing = await preprocess_dataset(
         settings=settings,
         rows=import_preview["normalized_dataset"]["rows"],
-        fields=fields,
+        fields=_sanitize_fields_for_preprocessing(fields),
     )
     profile = await profile_imported_dataset(
         settings=settings,

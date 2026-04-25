@@ -1846,11 +1846,7 @@ export function App() {
       <main className="workspace">
         <header className="topbar">
           <div>
-            <p className="eyebrow">Рабочий процесс аналитического сравнения</p>
             <h1>Сравнительный анализ объектов</h1>
-            <p className="subtitle">
-              Полный рабочий процесс: загрузка данных, подготовка признаков, настройка весов и выпуск отчета.
-            </p>
           </div>
           <div className="topbar-actions">
             <button className="ghost-button" onClick={resetWorkflow}>Новый расчет</button>
@@ -2339,7 +2335,24 @@ export function App() {
                                     label="Что делать с пропусками"
                                     tip="Политика обработки отсутствующих значений: исключение наблюдений, статистическая импутация или подстановка фиксированной константы."
                                   />
-                                  <select value={field.missing_strategy} onChange={(event) => updateField(index, { missing_strategy: event.target.value })}>
+                                  <select
+                                    value={field.missing_strategy}
+                                    onChange={(event) => {
+                                      const nextStrategy = event.target.value;
+                                      const needsDefaultConstant =
+                                        nextStrategy === "constant"
+                                        && (field.missing_constant === null || field.missing_constant === undefined || field.missing_constant === "");
+                                      updateField(
+                                        index,
+                                        needsDefaultConstant
+                                          ? {
+                                            missing_strategy: nextStrategy,
+                                            missing_constant: field.field_type === "numeric" ? 0 : "unknown",
+                                          }
+                                          : { missing_strategy: nextStrategy },
+                                      );
+                                    }}
+                                  >
                                     <option value="none">{methodLabel("none")}</option>
                                     <option value="drop_row">{methodLabel("drop_row")}</option>
                                     {field.field_type === "numeric" ? <option value="median">{methodLabel("median")}</option> : null}
@@ -2352,8 +2365,17 @@ export function App() {
                                   <label>
                                     Подставляемое значение
                                     <input
+                                      type={field.field_type === "numeric" ? "number" : "text"}
+                                      step={field.field_type === "numeric" ? "any" : undefined}
                                       value={String(field.missing_constant ?? "")}
-                                      onChange={(event) => updateField(index, { missing_constant: event.target.value })}
+                                      onChange={(event) => {
+                                        const rawValue = event.target.value;
+                                        updateField(index, {
+                                          missing_constant: field.field_type === "numeric"
+                                            ? (rawValue === "" ? null : Number(rawValue))
+                                            : rawValue,
+                                        });
+                                      }}
                                       placeholder="например 0 или unknown"
                                     />
                                   </label>

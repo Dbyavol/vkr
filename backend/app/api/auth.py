@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy.orm import Session
 
+from app.core.logging import log_audit_event
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.auth import AdminStats, LoginRequest, TokenResponse, UserCreate, UserRead
@@ -42,12 +43,14 @@ def require_admin(user: User = Depends(current_user)) -> User:
 @router.post("/auth/register", response_model=TokenResponse, status_code=201)
 def register(payload: UserCreate, db: Session = Depends(get_db)) -> TokenResponse:
     if get_user_by_email(db, payload.email):
+        log_audit_event("auth_register_conflict", email=payload.email)
         raise HTTPException(
             status_code=409,
             detail={"code": "USER_EXISTS", "message": "Пользователь с таким email уже зарегистрирован"},
         )
     user = create_user(db, payload)
     token = create_access_token(str(user.id), {"email": user.email, "role": user.role})
+    log_audit_event("auth_register_success", user_id=user.id, email=user.email, role=user.role)
     return TokenResponse(access_token=token, user=UserRead.model_validate(user))
 
 
@@ -55,12 +58,14 @@ def register(payload: UserCreate, db: Session = Depends(get_db)) -> TokenRespons
 def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse:
     user = get_user_by_email(db, payload.email)
     if user is None or not verify_password(payload.password, user.password_hash):
+        log_audit_event("auth_login_failed", email=payload.email)
         raise HTTPException(
             status_code=401,
             detail={"code": "INVALID_CREDENTIALS", "message": "Неверный email или пароль"},
         )
     mark_login(db, user)
     token = create_access_token(str(user.id), {"email": user.email, "role": user.role})
+    log_audit_event("auth_login_success", user_id=user.id, email=user.email, role=user.role)
     return TokenResponse(access_token=token, user=UserRead.model_validate(user))
 
 

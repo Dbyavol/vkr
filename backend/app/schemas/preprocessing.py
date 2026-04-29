@@ -8,6 +8,7 @@ MissingStrategy = Literal["none", "drop_row", "mean", "median", "mode", "constan
 OutlierMethod = Literal["none", "iqr_remove", "iqr_clip", "zscore_remove", "zscore_clip"]
 NormalizationMethod = Literal["none", "minmax", "zscore", "robust", "log_minmax"]
 EncodingMethod = Literal["none", "one_hot", "ordinal", "binary_map"]
+ProfileDetailLevel = Literal["summary", "detailed"]
 
 
 class DatasetRow(BaseModel):
@@ -157,10 +158,12 @@ class DatasetProfileRequest(BaseModel):
     max_unique_values: int = 30
     histogram_bins: int = 8
     histogram_bins_by_field: dict[str, int] = Field(default_factory=dict)
+    detail_level: ProfileDetailLevel = "detailed"
 
 
 class DatasetProfileResponse(BaseModel):
     rows_total: int
+    detail_level: ProfileDetailLevel = "detailed"
     fields: list[FieldProfile]
     quality: DatasetQualityReport
     recommended_weights: dict[str, float] = Field(default_factory=dict)

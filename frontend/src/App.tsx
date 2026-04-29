@@ -5,6 +5,7 @@ import {
   bindReportToHistory,
   createProject,
   downloadDocxReport,
+  fetchStoredProfile,
   fetchAdminStats,
   fetchAdminUsers,
   fetchHistory,
@@ -641,6 +642,7 @@ type SavedWorkflowState = {
   missingMatrixPreview?: Array<{ id: string; missing_count: number; missing_fields: string[] }>;
   correlationMatrix?: Array<{ left_key: string; right_key: string; pearson: number; samples: number }>;
   lastHistoryId?: number | null;
+  profileDetailLevel?: "summary" | "detailed";
 };
 
 const WORKFLOW_STORAGE_KEY = "comparison_workflow_state";
@@ -1019,6 +1021,8 @@ export function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [applyingSection, setApplyingSection] = useState<PrepSectionId | null>(null);
+  const [profileDetailLevel, setProfileDetailLevel] = useState<"summary" | "detailed">(savedWorkflow.profileDetailLevel ?? "summary");
+  const [profileDetailsLoading, setProfileDetailsLoading] = useState(false);
 
   const totalWeight = useMemo(() => criteria.reduce((sum, item) => sum + Number(item.weight || 0), 0), [criteria]);
   const completedStages = {
@@ -1070,6 +1074,47 @@ export function App() {
       ),
     [fields, histogramBinsByField],
   );
+
+  function applyProfileSnapshot(
+    nextProfile: FieldProfile[],
+    nextQuality: DatasetQualityReport | null,
+    nextRecommendedWeights: Record<string, number>,
+    nextWeightNotes: string[],
+    nextMissingMatrixPreview: Array<{ id: string; missing_count: number; missing_fields: string[] }>,
+    nextCorrelationMatrix: Array<{ left_key: string; right_key: string; pearson: number; samples: number }>,
+    nextDetailLevel: "summary" | "detailed",
+  ) {
+    setProfile(nextProfile);
+    setQuality(nextQuality);
+    setRecommendedWeights(nextRecommendedWeights);
+    setWeightNotes(nextWeightNotes);
+    setMissingMatrixPreview(nextMissingMatrixPreview);
+    setCorrelationMatrix(nextCorrelationMatrix);
+    setProfileDetailLevel(nextDetailLevel);
+  }
+
+  async function loadDetailedStoredProfile(nextDatasetFileId: number, nextFilename: string, nextFields?: FieldConfig[]) {
+    setProfileDetailsLoading(true);
+    try {
+      const response = await fetchStoredProfile(nextDatasetFileId, nextFilename, {
+        histogramBinsByField: histogramBinsForRefresh,
+        detailLevel: "detailed",
+      });
+      applyProfileSnapshot(
+        response.profile.fields,
+        response.profile.quality,
+        response.profile.recommended_weights,
+        response.profile.weight_notes,
+        response.profile.missing_matrix_preview ?? [],
+        response.profile.correlation_matrix ?? [],
+        "detailed",
+      );
+    } catch (detailsError) {
+      console.error(detailsError);
+    } finally {
+      setProfileDetailsLoading(false);
+    }
+  }
 
   function buildOrdinalMapForField(fieldKey: string) {
     const column = preview?.columns.find((item) => item.normalized_name === fieldKey);
@@ -1158,6 +1203,8 @@ export function App() {
     setHistogramBinsByField({});
     setHistogramDraftBinsByField({});
     setChartModeByField({});
+    setProfileDetailLevel("summary");
+    setProfileDetailsLoading(false);
     setReportPreviewOpen(false);
     setError(null);
     localStorage.removeItem(WORKFLOW_STORAGE_KEY);
@@ -1236,6 +1283,44 @@ export function App() {
   }, [result, resultsPage]);
 
   useEffect(() => {
+    if (activeStage !== "preprocessing") return;
+    if (!preview) return;
+    if (!fields.length) {
+      const nextFields = profile.length
+        ? profile.map((field) => ({
+            ...field.recommended_config,
+            missing_strategy: "none",
+            outlier_method: "none",
+            normalization: "none",
+            encoding: "none",
+          }))
+        : preview.columns.map((column) => fieldDefaults(column));
+      setFields(nextFields);
+      const nextHistogramBinsByField = Object.fromEntries(
+        nextFields
+          .filter((field) => field.field_type === "numeric")
+          .map((field) => [field.key, Math.min(64, Math.max(2, histogramBinsByField[field.key] ?? 8))]),
+      );
+      setHistogramBinsByField(nextHistogramBinsByField);
+      setHistogramDraftBinsByField(nextHistogramBinsByField);
+      setChartModeByField({});
+      if (!targetRowId) {
+        setTargetRowId(preview.normalized_dataset?.rows?.[0]?.id ?? "");
+      }
+      return;
+    }
+    if (!datasetFileId || !sourceFilename) return;
+    if (profileDetailLevel === "detailed" || profileDetailsLoading) return;
+    void loadDetailedStoredProfile(datasetFileId, sourceFilename);
+  }, [activeStage, datasetFileId, sourceFilename, profileDetailLevel, profileDetailsLoading, preview, fields, profile, histogramBinsByField, targetRowId]);
+
+  useEffect(() => {
+    if (activeStage !== "criteria") return;
+    if (!fields.length || criteria.length) return;
+    setCriteria(criteriaDefaults(fields, recommendedWeights, analysisMode));
+  }, [activeStage, fields, criteria.length, recommendedWeights, analysisMode]);
+
+  useEffect(() => {
     const state: SavedWorkflowState = {
       activeStage,
       datasetFileId,
@@ -1258,6 +1343,7 @@ export function App() {
       preprocessingSection,
       histogramBinsByField,
       lastHistoryId,
+      profileDetailLevel,
     };
     localStorage.setItem(WORKFLOW_STORAGE_KEY, JSON.stringify(state));
   }, [
@@ -1282,6 +1368,7 @@ export function App() {
     preprocessingSection,
     histogramBinsByField,
     lastHistoryId,
+    profileDetailLevel,
   ]);
 
   async function refreshHistory(openStage = true) {
@@ -1504,29 +1591,20 @@ export function App() {
       const response = await profileFile(file);
       setDatasetFileId(response.dataset_file_id ?? null);
       setSourceFilename(file.name);
-      const inferredFields = response.profile.fields.map((field) => ({
-        ...field.recommended_config,
-        missing_strategy: "none",
-        outlier_method: "none",
-        normalization: "none",
-        encoding: "none",
-      }));
       setPreview(response.preview);
-      setProfile(response.profile.fields);
-      setQuality(response.profile.quality);
-      setRecommendedWeights(response.profile.recommended_weights);
-      setWeightNotes(response.profile.weight_notes);
-      setMissingMatrixPreview(response.profile.missing_matrix_preview ?? []);
-      setCorrelationMatrix(response.profile.correlation_matrix ?? []);
-      setFields(inferredFields);
-      setCriteria(criteriaDefaults(inferredFields, response.profile.recommended_weights, analysisMode));
-      const nextHistogramBinsByField = Object.fromEntries(
-        response.profile.fields
-          .filter((field) => field.inferred_type === "numeric")
-          .map((field) => [field.key, Math.min(64, Math.max(2, histogramBinsByField[field.key] ?? 8))]),
+      applyProfileSnapshot(
+        response.profile.fields,
+        response.profile.quality,
+        response.profile.recommended_weights,
+        response.profile.weight_notes,
+        response.profile.missing_matrix_preview ?? [],
+        response.profile.correlation_matrix ?? [],
+        response.profile.detail_level === "detailed" ? "detailed" : "summary",
       );
-      setHistogramBinsByField(nextHistogramBinsByField);
-      setHistogramDraftBinsByField(nextHistogramBinsByField);
+      setFields([]);
+      setCriteria([]);
+      setHistogramBinsByField({});
+      setHistogramDraftBinsByField({});
       setChartModeByField({});
       const firstRowId = response.preview.normalized_dataset?.rows?.[0]?.id ?? "";
       setTargetRowId(firstRowId);
@@ -1588,15 +1666,41 @@ export function App() {
     try {
       const response = await refreshPreprocessing(datasetFileId, fields, sourceFilename || preview?.filename || undefined, {
         histogramBinsByField: histogramBinsForRefresh,
+        detailLevel: "summary",
       });
       setPreview(response.preview);
-      setProfile(response.profile.fields);
-      setQuality(response.profile.quality);
-      setRecommendedWeights(response.profile.recommended_weights);
-      setWeightNotes(response.profile.weight_notes);
-      setMissingMatrixPreview(response.profile.missing_matrix_preview ?? []);
-      setCorrelationMatrix(response.profile.correlation_matrix ?? []);
-      setCriteria(criteriaDefaults(fields, response.profile.recommended_weights, analysisMode));
+      applyProfileSnapshot(
+        response.profile.fields,
+        response.profile.quality,
+        response.profile.recommended_weights,
+        response.profile.weight_notes,
+        response.profile.missing_matrix_preview ?? [],
+        response.profile.correlation_matrix ?? [],
+        response.profile.detail_level === "detailed" ? "detailed" : "summary",
+      );
+      setProfileDetailsLoading(true);
+      void refreshPreprocessing(datasetFileId, fields, sourceFilename || preview?.filename || undefined, {
+        histogramBinsByField: histogramBinsForRefresh,
+        detailLevel: "detailed",
+      })
+        .then((detailedResponse) => {
+          setPreview(detailedResponse.preview);
+          applyProfileSnapshot(
+            detailedResponse.profile.fields,
+            detailedResponse.profile.quality,
+            detailedResponse.profile.recommended_weights,
+            detailedResponse.profile.weight_notes,
+            detailedResponse.profile.missing_matrix_preview ?? [],
+            detailedResponse.profile.correlation_matrix ?? [],
+            detailedResponse.profile.detail_level === "detailed" ? "detailed" : "summary",
+          );
+        })
+        .catch((detailsError) => {
+          console.error(detailsError);
+        })
+        .finally(() => {
+          setProfileDetailsLoading(false);
+        });
     } catch (applyError) {
       setError(applyError instanceof Error ? applyError.message : "Не удалось применить настройки предобработки");
     } finally {
@@ -1848,6 +1952,7 @@ export function App() {
         <header className="topbar">
           <div>
             <h1>Сравнительный анализ объектов</h1>
+            {profileDetailsLoading ? <p className="muted-note">Расширенная аналитика догружается в фоне.</p> : null}
           </div>
           <div className="topbar-actions">
             <button className="ghost-button" onClick={resetWorkflow}>Новый расчет</button>
@@ -1967,17 +2072,23 @@ export function App() {
                 <button className="wide-button" onClick={handlePreview} disabled={!file || loading}>
                   {loading ? "Анализируем файл..." : "Построить предпросмотр"}
                 </button>
+                <p className="muted-note">
+                  Сначала система отдает быстрый профиль, а расширенные графики и статистики догружает отдельно, чтобы не блокировать интерфейс.
+                </p>
               </div>
             </div>
 
             <div className="panel">
-              <div className="panel-head">
-                <div>
-                  <span className="section-kicker">Предпросмотр</span>
-                  <h2>Первые строки датасета</h2>
+                <div className="panel-head">
+                  <div>
+                    <span className="section-kicker">Предпросмотр</span>
+                    <h2>Первые строки датасета</h2>
+                  </div>
+                  <div className="panel-head-actions">
+                    {preview ? <span className="pill">{preview.rows_total} строк</span> : null}
+                    {preview ? <span className="pill">{profileDetailLevel === "detailed" ? "Полный профиль" : "Быстрый профиль"}</span> : null}
+                  </div>
                 </div>
-                {preview ? <span className="pill">{preview.rows_total} строк</span> : null}
-              </div>
               {preview ? (
                 <>
                   {preview.warnings.length > 0 ? (

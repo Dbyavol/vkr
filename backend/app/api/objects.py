@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from app.core.logging import log_audit_event
 from app.db.session import get_db
-from app.schemas.objects import ObjectCreate, ObjectRead, ObjectUpdate, ObjectTypeCreate, ObjectTypeRead
+from app.schemas.objects import ObjectCreate, ObjectRead, ObjectTypeCreate, ObjectTypeRead, ObjectUpdate
 from app.services.object_service import (
     create_object,
     create_object_type,
@@ -24,7 +25,9 @@ def read_object_types(db: Session = Depends(get_db)) -> list[ObjectTypeRead]:
 
 @router.post("/object-types", response_model=ObjectTypeRead, status_code=201)
 def create_object_type_endpoint(payload: ObjectTypeCreate, db: Session = Depends(get_db)) -> ObjectTypeRead:
-    return create_object_type(db, payload)
+    item = create_object_type(db, payload)
+    log_audit_event("object_type_created", object_type_id=item.id, name=item.name, code=item.code)
+    return item
 
 
 @router.get("/object-types/{object_type_id}", response_model=ObjectTypeRead)
@@ -45,7 +48,9 @@ def read_objects(
 
 @router.post("/objects", response_model=ObjectRead, status_code=201)
 def create_object_endpoint(payload: ObjectCreate, db: Session = Depends(get_db)) -> ObjectRead:
-    return create_object(db, payload)
+    item = create_object(db, payload)
+    log_audit_event("object_created", object_id=item.id, title=item.title, object_type_id=item.object_type_id)
+    return item
 
 
 @router.get("/objects/{object_id}", response_model=ObjectRead)
@@ -61,6 +66,7 @@ def update_object_endpoint(object_id: int, payload: ObjectUpdate, db: Session = 
     entity = update_object(db, object_id, payload)
     if entity is None:
         raise HTTPException(status_code=404, detail="Object not found")
+    log_audit_event("object_updated", object_id=entity.id, title=entity.title, object_type_id=entity.object_type_id)
     return entity
 
 
@@ -68,3 +74,4 @@ def update_object_endpoint(object_id: int, payload: ObjectUpdate, db: Session = 
 def delete_object_endpoint(object_id: int, db: Session = Depends(get_db)) -> None:
     if not delete_object(db, object_id):
         raise HTTPException(status_code=404, detail="Object not found")
+    log_audit_event("object_deleted", object_id=object_id)

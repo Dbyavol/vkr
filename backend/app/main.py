@@ -1,8 +1,10 @@
+from contextlib import asynccontextmanager
 from io import BytesIO
 
 from docx import Document
-from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.responses import StreamingResponse
 from sqlalchemy import inspect, text
 
@@ -10,6 +12,14 @@ from app.api.auth import router as auth_router
 from app.api.files import router as files_router
 from app.api.objects import router as objects_router
 from app.core.config import get_settings
+from app.core.logging import (
+    configure_logging,
+    elapsed_ms,
+    get_logger,
+    get_request_identity,
+    log_audit_event,
+    start_timer,
+)
 from app.db.base import Base
 from app.db.session import SessionLocal, engine
 from app.models import files, objects, user  # noqa: F401
@@ -20,38 +30,27 @@ from app.schemas.pipeline import (
     PipelineProfileStoredResponse,
     PipelineRequest,
     PipelineRunResponse,
+    PipelineStoredProfileRequest,
     PipelineStoredRunRequest,
     ReportRequest,
 )
 from app.services.pipeline_engine import (
+    fetch_stored_dataset_profile,
     fetch_system_dashboard,
     refresh_preprocessing_from_storage,
     run_pipeline_from_storage,
     run_pipeline_via_services,
     upload_and_profile_dataset,
 )
+from app.services.profile_artifact_service import build_and_cache_detailed_profile_artifact
 from app.services.user_service import bootstrap_admin
 
 settings = get_settings()
-
-app = FastAPI(
-    title=settings.app_name,
-    version="0.2.0",
-    debug=settings.debug,
-    description="Модульный монолит для сравнительного анализа объектов.",
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.cors_origin_list,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+configure_logging()
+request_logger = get_logger("app.request")
 
 
-@app.on_event("startup")
-def startup() -> None:
+def initialize_application_state() -> None:
     Base.metadata.create_all(bind=engine)
     inspector = inspect(engine)
     if "comparison_history" in inspector.get_table_names():
@@ -74,36 +73,146 @@ def startup() -> None:
         db.close()
 
 
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    initialize_application_state()
+    yield
+
+
+app = FastAPI(
+    title=settings.app_name,
+    version="0.2.0",
+    debug=settings.debug,
+    description="Модульный монолит для сравнительного анализа объектов.",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origin_list,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.middleware("http")
+async def request_logging_middleware(request: Request, call_next):
+    started_at = start_timer()
+    identity = get_request_identity(request)
+    request_id = request.headers.get("x-request-id") or f"req-{int(started_at * 1000)}"
+    request.state.request_id = request_id
+    request.state.user_id = identity.get("user_id")
+    request.state.user_email = identity.get("user_email")
+    request.state.user_role = identity.get("user_role")
+
+    try:
+        response = await call_next(request)
+    except Exception:
+        duration_ms = elapsed_ms(started_at)
+        request_logger.exception(
+            "request_failed %s",
+            " ".join(
+                [
+                    f"request_id={request_id!r}",
+                    f"method={request.method!r}",
+                    f"path={request.url.path!r}",
+                    f"query={str(request.url.query)!r}",
+                    f"user_id={identity.get('user_id')!r}",
+                    f"user_email={identity.get('user_email')!r}",
+                    f"duration_ms={duration_ms:.2f}",
+                ]
+            ),
+        )
+        raise
+
+    duration_ms = elapsed_ms(started_at)
+    response.headers["X-Request-Id"] = request_id
+    request_logger.info(
+        "request_completed request_id=%r method=%r path=%r query=%r status_code=%r user_id=%r user_email=%r duration_ms=%.2f",
+        request_id,
+        request.method,
+        request.url.path,
+        str(request.url.query),
+        response.status_code,
+        identity.get("user_id"),
+        identity.get("user_email"),
+        duration_ms,
+    )
+    return response
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    if exc.status_code >= 500:
+        request_logger.error(
+            "http_exception request_id=%r method=%r path=%r status_code=%r detail=%r",
+            getattr(request.state, "request_id", None),
+            request.method,
+            request.url.path,
+            exc.status_code,
+            exc.detail,
+            exc_info=True,
+        )
+    else:
+        request_logger.warning(
+            "http_exception request_id=%r method=%r path=%r status_code=%r detail=%r",
+            getattr(request.state, "request_id", None),
+            request.method,
+            request.url.path,
+            exc.status_code,
+            exc.detail,
+        )
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    request_logger.error(
+        "unhandled_exception request_id=%r method=%r path=%r user_id=%r user_email=%r",
+        getattr(request.state, "request_id", None),
+        request.method,
+        request.url.path,
+        getattr(request.state, "user_id", None),
+        getattr(request.state, "user_email", None),
+        exc_info=True,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"detail": {"code": "INTERNAL_SERVER_ERROR", "message": "Внутренняя ошибка сервера"}},
+    )
+
+
 @app.get("/health")
 def healthcheck() -> dict[str, str]:
     return {"status": "ok"}
 
 
 SUMMARY_LABELS = {
-    "objects_count": "Количество Объектов",
-    "criteria_count": "Количество Критериев",
-    "weights_sum": "Сумма Весов",
-    "best_object_id": "Лучший Объект",
-    "best_score": "Лучшая Оценка",
+    "objects_count": "Количество объектов",
+    "criteria_count": "Количество критериев",
+    "weights_sum": "Сумма весов",
+    "best_object_id": "Лучший объект",
+    "best_score": "Лучшая оценка",
     "normalization_notes": "Нормализация",
-    "mode": "Режим Анализа",
-    "target_object_id": "Целевой Объект",
-    "confidence_score": "Надежность Расчета",
-    "confidence_notes": "Замечания К Качеству",
-    "ranking_stability_note": "Устойчивость Рейтинга",
-    "analog_groups": "Группы Аналогов",
-    "dominance_pairs": "Доминирование Объектов",
+    "mode": "Режим анализа",
+    "target_object_id": "Целевой объект",
+    "confidence_score": "Надежность расчета",
+    "confidence_notes": "Замечания к качеству",
+    "ranking_stability_note": "Устойчивость рейтинга",
+    "analog_groups": "Группы аналогов",
+    "dominance_pairs": "Доминирование объектов",
 }
 
 DIRECTION_LABELS = {
     "maximize": "Максимизация",
     "minimize": "Минимизация",
-    "target": "Близость К Целевому Значению",
+    "target": "Близость к целевому значению",
 }
 
 MODE_LABELS = {
-    "rating": "Рейтинг Объектов",
-    "analog_search": "Поиск Аналогов",
+    "rating": "Рейтинг объектов",
+    "analog_search": "Поиск аналогов",
 }
 
 
@@ -118,14 +227,14 @@ def report_value(key: str, value: object) -> str:
         return MODE_LABELS.get(str(value), str(value))
     if isinstance(value, list):
         if not value:
-            return "Нет Данных"
+            return "Нет данных"
         if all(isinstance(item, str) for item in value):
             return "; ".join(str(item) for item in value)
-        return f"{len(value)} Записей"
+        return f"{len(value)} записей"
     if isinstance(value, float):
         return f"{value:.4f}"
     if isinstance(value, dict):
-        return "См. Детальный Раздел"
+        return "См. детальный раздел"
     return str(value)
 
 
@@ -135,12 +244,65 @@ async def system_dashboard(authorization: str | None = Header(default=None)) -> 
 
 
 @app.post(f"{settings.api_prefix}/pipeline/upload-profile", response_model=PipelineProfileStoredResponse)
-async def pipeline_upload_profile(file: UploadFile = File(...)) -> PipelineProfileStoredResponse:
+async def pipeline_upload_profile(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    detail_level: str = Form(default="summary"),
+) -> PipelineProfileStoredResponse:
     try:
         body = await file.read()
-        data = await upload_and_profile_dataset(filename=file.filename or "dataset", body=body)
+        data = await upload_and_profile_dataset(
+            filename=file.filename or "dataset",
+            body=body,
+            detail_level="detailed" if detail_level == "detailed" else "summary",
+        )
+        log_audit_event(
+            "pipeline_upload_profile",
+            filename=file.filename or "dataset",
+            size_bytes=len(body),
+            dataset_file_id=data.get("dataset_file_id"),
+            detail_level=detail_level,
+        )
+        if detail_level != "detailed" and data.get("dataset_file_id"):
+            background_tasks.add_task(
+                build_and_cache_detailed_profile_artifact,
+                dataset_file_id=int(data["dataset_file_id"]),
+                filename=file.filename or "dataset",
+            )
         return PipelineProfileStoredResponse.model_validate(data)
     except ValueError as exc:
+        request_logger.error(
+            "pipeline_upload_profile_failed filename=%r",
+            file.filename or "dataset",
+            exc_info=True,
+        )
+        raise HTTPException(status_code=400, detail={"code": "PIPELINE_PROFILE_ERROR", "message": str(exc)}) from exc
+
+
+@app.post(f"{settings.api_prefix}/pipeline/profile-stored", response_model=PipelineProfileStoredResponse)
+async def pipeline_profile_stored(payload: PipelineStoredProfileRequest) -> PipelineProfileStoredResponse:
+    try:
+        data = await fetch_stored_dataset_profile(
+            dataset_file_id=payload.dataset_file_id,
+            filename=payload.filename,
+            histogram_bins=payload.histogram_bins,
+            histogram_bins_by_field=payload.histogram_bins_by_field,
+            detail_level=payload.profile_detail_level,
+        )
+        log_audit_event(
+            "pipeline_profile_stored",
+            dataset_file_id=payload.dataset_file_id,
+            filename=payload.filename or "dataset",
+            detail_level=payload.profile_detail_level,
+        )
+        return PipelineProfileStoredResponse.model_validate(data)
+    except ValueError as exc:
+        request_logger.error(
+            "pipeline_profile_stored_failed dataset_file_id=%r filename=%r",
+            payload.dataset_file_id,
+            payload.filename or "dataset",
+            exc_info=True,
+        )
         raise HTTPException(status_code=400, detail={"code": "PIPELINE_PROFILE_ERROR", "message": str(exc)}) from exc
 
 
@@ -154,13 +316,28 @@ async def pipeline_run(
         config = PipelineConfig.model_validate_json(config_json)
         body = await file.read()
         request = PipelineRequest(filename=file.filename or "dataset", config=config)
-        return await run_pipeline_via_services(
+        response = await run_pipeline_via_services(
             filename=file.filename or "dataset",
             body=body,
             payload=request,
             authorization=authorization,
         )
+        log_audit_event(
+            "pipeline_run",
+            filename=file.filename or "dataset",
+            size_bytes=len(body),
+            mode=config.analysis_mode,
+            target_row_id=config.target_row_id,
+            criteria_count=len(config.criteria),
+            history_id=response.history_id,
+        )
+        return response
     except ValueError as exc:
+        request_logger.error(
+            "pipeline_run_failed filename=%r",
+            file.filename or "dataset",
+            exc_info=True,
+        )
         raise HTTPException(status_code=400, detail={"code": "PIPELINE_VALIDATION_ERROR", "message": str(exc)}) from exc
 
 
@@ -171,13 +348,29 @@ async def pipeline_run_stored(
 ) -> PipelineRunResponse:
     try:
         request = PipelineRequest(filename=payload.filename or "dataset", config=payload.config)
-        return await run_pipeline_from_storage(
+        response = await run_pipeline_from_storage(
             dataset_file_id=payload.dataset_file_id,
             filename=payload.filename,
             payload=request,
             authorization=authorization,
         )
+        log_audit_event(
+            "pipeline_run_stored",
+            dataset_file_id=payload.dataset_file_id,
+            filename=payload.filename or "dataset",
+            mode=payload.config.analysis_mode,
+            target_row_id=payload.config.target_row_id,
+            criteria_count=len(payload.config.criteria),
+            history_id=response.history_id,
+        )
+        return response
     except ValueError as exc:
+        request_logger.error(
+            "pipeline_run_stored_failed dataset_file_id=%r filename=%r",
+            payload.dataset_file_id,
+            payload.filename or "dataset",
+            exc_info=True,
+        )
         raise HTTPException(status_code=400, detail={"code": "PIPELINE_VALIDATION_ERROR", "message": str(exc)}) from exc
 
 
@@ -190,9 +383,24 @@ async def pipeline_preprocess_refresh(payload: PipelinePreprocessRefreshRequest)
             fields=[field.model_dump() for field in payload.fields],
             histogram_bins=payload.histogram_bins,
             histogram_bins_by_field=payload.histogram_bins_by_field,
+            detail_level=payload.profile_detail_level,
+        )
+        log_audit_event(
+            "pipeline_preprocess_refresh",
+            dataset_file_id=payload.dataset_file_id,
+            filename=payload.filename or "dataset",
+            fields_count=len(payload.fields),
+            histogram_bins=payload.histogram_bins,
+            detail_level=payload.profile_detail_level,
         )
         return PipelinePreprocessRefreshResponse.model_validate(data)
     except ValueError as exc:
+        request_logger.error(
+            "pipeline_preprocess_refresh_failed dataset_file_id=%r filename=%r",
+            payload.dataset_file_id,
+            payload.filename or "dataset",
+            exc_info=True,
+        )
         raise HTTPException(
             status_code=400,
             detail={"code": "PIPELINE_PREPROCESSING_REFRESH_ERROR", "message": str(exc)},
@@ -201,9 +409,15 @@ async def pipeline_preprocess_refresh(payload: PipelinePreprocessRefreshRequest)
 
 @app.post(f"{settings.api_prefix}/reports/comparison.docx")
 def comparison_report(payload: ReportRequest) -> StreamingResponse:
+    log_audit_event(
+        "comparison_report_generated",
+        title=payload.title,
+        criteria_count=len(payload.criteria),
+        ranking_count=len(payload.result.ranking),
+    )
     document = Document()
     document.add_heading(payload.title, 0)
-    document.add_paragraph("Отчет Сформирован Модульным Монолитом Системы Сравнительного Анализа.")
+    document.add_paragraph("Отчет сформирован модульным монолитом системы сравнительного анализа.")
 
     document.add_heading("Сводка", level=1)
     summary_table = document.add_table(rows=1, cols=2)

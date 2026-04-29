@@ -80,6 +80,7 @@ export type DatasetQualityReport = {
 
 export type DatasetProfileResponse = {
   rows_total: number;
+  detail_level?: "summary" | "detailed";
   fields: FieldProfile[];
   quality: DatasetQualityReport;
   recommended_weights: Record<string, number>;

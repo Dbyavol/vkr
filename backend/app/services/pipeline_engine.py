@@ -3,14 +3,24 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from app.core.logging import elapsed_ms, get_logger, log_audit_event, start_timer
 from app.db.session import SessionLocal
 from app.schemas.analysis import AnalysisDataset, AnalysisFilters, AnalysisRequest, CriterionConfig as AnalysisCriterionConfig, DatasetObject
 from app.schemas.files import ComparisonHistoryCreate
 from app.schemas.pipeline import PipelineRequest, PipelineRunResponse
-from app.schemas.preprocessing import DatasetPayload, DatasetProfileRequest, DatasetRow, FieldConfig, PreprocessingOptions, PreprocessingRequest
+from app.schemas.preprocessing import (
+    DatasetPayload,
+    DatasetProfileRequest,
+    DatasetRow,
+    FieldConfig,
+    PreprocessingOptions,
+    PreprocessingRequest,
+    ProfileDetailLevel,
+)
 from app.services.analysis_engine import run_comparative_analysis
 from app.services.file_service import StorageAdapter, create_comparison_history, create_file_record, get_file, storage_stats
 from app.services.import_parser import parse_dataset_bytes
+from app.services.profile_artifact_service import load_cached_detailed_profile
 from app.services.profiling_engine import profile_dataset
 from app.services.preprocessing_engine import preprocess_dataset
 from app.services.security import decode_access_token
@@ -18,6 +28,7 @@ from app.services.user_service import admin_stats, get_user
 
 
 PREVIEW_NORMALIZED_ROW_LIMIT = 200
+pipeline_logger = get_logger("app.pipeline")
 
 
 def _object_title(row: dict[str, Any]) -> str:
@@ -45,7 +56,16 @@ def _analysis_dataset(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 async def fetch_preview(*, filename: str, body: bytes) -> dict[str, Any]:
-    return parse_dataset_bytes(filename, body).model_dump()
+    started_at = start_timer()
+    preview = parse_dataset_bytes(filename, body).model_dump()
+    pipeline_logger.info(
+        "fetch_preview_completed filename=%r size_bytes=%r rows_total=%r duration_ms=%.2f",
+        filename,
+        len(body),
+        preview.get("rows_total"),
+        elapsed_ms(started_at),
+    )
+    return preview
 
 
 def lightweight_preview(preview: dict[str, Any], limit: int = PREVIEW_NORMALIZED_ROW_LIMIT) -> dict[str, Any]:
@@ -64,6 +84,7 @@ def lightweight_preview(preview: dict[str, Any], limit: int = PREVIEW_NORMALIZED
 
 
 async def upload_dataset_file(*, filename: str, body: bytes) -> dict[str, Any]:
+    started_at = start_timer()
     adapter = StorageAdapter()
     key, checksum = adapter.upload(filename, "application/octet-stream", body, prefix="comparison-dataset-source")
     with SessionLocal() as db:
@@ -75,6 +96,13 @@ async def upload_dataset_file(*, filename: str, body: bytes) -> dict[str, Any]:
             storage_key=key,
             size_bytes=len(body),
             checksum=checksum,
+        )
+        pipeline_logger.info(
+            "upload_dataset_file_completed filename=%r file_id=%r size_bytes=%r duration_ms=%.2f",
+            filename,
+            item.id,
+            len(body),
+            elapsed_ms(started_at),
         )
         return {"id": item.id, "original_name": item.original_name, "storage_key": item.storage_key}
 
@@ -102,6 +130,7 @@ async def fetch_stored_file_body(*, file_id: int) -> bytes:
 
 
 async def run_preprocessing(*, rows: list[dict[str, Any]], fields: list[dict[str, Any]]) -> dict[str, Any]:
+    started_at = start_timer()
     payload = PreprocessingRequest(
         dataset=DatasetPayload(rows=[DatasetRow.model_validate(row) for row in rows]),
         fields=[FieldConfig.model_validate(field) for field in fields],
@@ -112,7 +141,15 @@ async def run_preprocessing(*, rows: list[dict[str, Any]], fields: list[dict[str
             preserve_original_values=False,
         ),
     )
-    return preprocess_dataset(payload).model_dump()
+    result = preprocess_dataset(payload).model_dump()
+    pipeline_logger.info(
+        "run_preprocessing_completed input_rows=%r fields_count=%r output_rows=%r duration_ms=%.2f",
+        len(rows),
+        len(fields),
+        len(result.get("dataset") or []),
+        elapsed_ms(started_at),
+    )
+    return result
 
 
 async def profile_imported_dataset(
@@ -120,26 +157,77 @@ async def profile_imported_dataset(
     rows: list[dict[str, Any]],
     histogram_bins: int = 8,
     histogram_bins_by_field: dict[str, int] | None = None,
+    detail_level: ProfileDetailLevel = "detailed",
 ) -> dict[str, Any]:
+    started_at = start_timer()
     payload = DatasetProfileRequest(
         dataset=DatasetPayload(rows=[DatasetRow.model_validate(row) for row in rows]),
         max_unique_values=30,
         histogram_bins=histogram_bins,
         histogram_bins_by_field=histogram_bins_by_field or {},
+        detail_level=detail_level,
     )
-    return profile_dataset(payload).model_dump()
+    result = profile_dataset(payload).model_dump()
+    pipeline_logger.info(
+        "profile_imported_dataset_completed rows=%r fields_count=%r histogram_bins=%r detail_level=%r duration_ms=%.2f",
+        len(rows),
+        len(result.get("fields") or []),
+        histogram_bins,
+        detail_level,
+        elapsed_ms(started_at),
+    )
+    return result
 
 
-async def fetch_dataset_profile(*, filename: str, body: bytes) -> dict[str, Any]:
+async def fetch_dataset_profile(*, filename: str, body: bytes, detail_level: ProfileDetailLevel = "detailed") -> dict[str, Any]:
     preview = await fetch_preview(filename=filename, body=body)
-    profile = await profile_imported_dataset(rows=preview["normalized_dataset"]["rows"])
+    profile = await profile_imported_dataset(rows=preview["normalized_dataset"]["rows"], detail_level=detail_level)
     return {"preview": lightweight_preview(preview), "profile": profile}
 
 
-async def upload_and_profile_dataset(*, filename: str, body: bytes) -> dict[str, Any]:
+async def upload_and_profile_dataset(
+    *,
+    filename: str,
+    body: bytes,
+    detail_level: ProfileDetailLevel = "detailed",
+) -> dict[str, Any]:
     uploaded = await upload_dataset_file(filename=filename, body=body)
-    profiled = await fetch_dataset_profile(filename=filename, body=body)
+    profiled = await fetch_dataset_profile(filename=filename, body=body, detail_level=detail_level)
     return {"dataset_file_id": uploaded["id"], **profiled}
+
+
+async def fetch_stored_dataset_profile(
+    *,
+    dataset_file_id: int,
+    filename: str | None,
+    histogram_bins: int = 8,
+    histogram_bins_by_field: dict[str, int] | None = None,
+    detail_level: ProfileDetailLevel = "detailed",
+) -> dict[str, Any]:
+    if detail_level == "detailed" and histogram_bins == 8 and not histogram_bins_by_field:
+        cached = load_cached_detailed_profile(dataset_file_id)
+        if cached is not None:
+            metadata = await fetch_stored_file_metadata(file_id=dataset_file_id)
+            body = await fetch_stored_file_body(file_id=dataset_file_id)
+            resolved_filename = filename or metadata.get("original_name") or "dataset"
+            preview = await fetch_preview(filename=resolved_filename, body=body)
+            pipeline_logger.info(
+                "fetch_stored_dataset_profile_cache_hit dataset_file_id=%r filename=%r",
+                dataset_file_id,
+                resolved_filename,
+            )
+            return {"dataset_file_id": dataset_file_id, "preview": lightweight_preview(preview), "profile": cached}
+    metadata = await fetch_stored_file_metadata(file_id=dataset_file_id)
+    body = await fetch_stored_file_body(file_id=dataset_file_id)
+    resolved_filename = filename or metadata.get("original_name") or "dataset"
+    preview = await fetch_preview(filename=resolved_filename, body=body)
+    profile = await profile_imported_dataset(
+        rows=preview["normalized_dataset"]["rows"],
+        histogram_bins=histogram_bins,
+        histogram_bins_by_field=histogram_bins_by_field,
+        detail_level=detail_level,
+    )
+    return {"dataset_file_id": dataset_file_id, "preview": lightweight_preview(preview), "profile": profile}
 
 
 async def analyze_dataset(
@@ -153,6 +241,7 @@ async def analyze_dataset(
     include_stability_scenarios: bool,
     stability_variation_pct: float,
 ) -> dict[str, Any]:
+    started_at = start_timer()
     dataset = _analysis_dataset(rows)
     payload = AnalysisRequest(
         dataset=AnalysisDataset(
@@ -168,7 +257,17 @@ async def analyze_dataset(
         include_stability_scenarios=include_stability_scenarios,
         stability_variation_pct=stability_variation_pct,
     )
-    return run_comparative_analysis(payload).model_dump()
+    result = run_comparative_analysis(payload).model_dump()
+    pipeline_logger.info(
+        "analyze_dataset_completed rows=%r criteria_count=%r mode=%r top_n=%r ranking_count=%r duration_ms=%.2f",
+        len(rows),
+        len(criteria),
+        mode,
+        top_n,
+        len(result.get("ranking") or []),
+        elapsed_ms(started_at),
+    )
+    return result
 
 
 async def fetch_current_user(authorization: str | None) -> dict[str, Any] | None:
@@ -195,6 +294,7 @@ async def save_comparison_history(
     result: dict[str, Any],
     dataset_file_id: int | None = None,
 ) -> dict[str, Any] | None:
+    started_at = start_timer()
     if user is None:
         return None
 
@@ -266,6 +366,20 @@ async def save_comparison_history(
                 status="completed",
             ),
         )
+        pipeline_logger.info(
+            "save_comparison_history_completed user_id=%r history_id=%r dataset_file_id=%r duration_ms=%.2f",
+            user.get("id"),
+            history_item.id,
+            dataset_file_id,
+            elapsed_ms(started_at),
+        )
+        log_audit_event(
+            "comparison_history_saved",
+            user_id=user.get("id"),
+            history_id=history_item.id,
+            dataset_file_id=dataset_file_id,
+            title=history_item.title,
+        )
         return {"id": history_item.id, "project_id": history_item.project_id, "title": history_item.title}
 
 
@@ -335,6 +449,7 @@ async def run_pipeline_via_services(
     authorization: str | None = None,
     dataset_file_id: int | None = None,
 ) -> PipelineRunResponse:
+    total_started_at = start_timer()
     user = await fetch_current_user(authorization)
     preview = await fetch_preview(filename=filename, body=body)
     fields_payload = _sanitize_fields_for_preprocessing([field.model_dump() for field in payload.config.fields])
@@ -379,6 +494,16 @@ async def run_pipeline_via_services(
         dataset_file_id=dataset_file_id,
     )
     response_payload.history_id = history_item.get("id") if history_item else None
+    pipeline_logger.info(
+        "run_pipeline_via_services_completed filename=%r dataset_file_id=%r user_id=%r criteria_count=%r rows_total=%r history_id=%r duration_ms=%.2f",
+        filename,
+        dataset_file_id,
+        user.get("id") if user else None,
+        len(payload.config.criteria),
+        len(preview["normalized_dataset"]["rows"]),
+        response_payload.history_id,
+        elapsed_ms(total_started_at),
+    )
     return response_payload
 
 
@@ -389,16 +514,25 @@ async def run_pipeline_from_storage(
     payload: PipelineRequest,
     authorization: str | None = None,
 ) -> PipelineRunResponse:
+    started_at = start_timer()
     metadata = await fetch_stored_file_metadata(file_id=dataset_file_id)
     body = await fetch_stored_file_body(file_id=dataset_file_id)
     resolved_filename = filename or metadata.get("original_name") or payload.filename or "dataset"
-    return await run_pipeline_via_services(
+    response = await run_pipeline_via_services(
         filename=resolved_filename,
         body=body,
         payload=payload,
         authorization=authorization,
         dataset_file_id=dataset_file_id,
     )
+    pipeline_logger.info(
+        "run_pipeline_from_storage_completed dataset_file_id=%r filename=%r history_id=%r duration_ms=%.2f",
+        dataset_file_id,
+        resolved_filename,
+        response.history_id,
+        elapsed_ms(started_at),
+    )
+    return response
 
 
 def _is_missing(value: Any) -> bool:
@@ -453,7 +587,9 @@ async def refresh_preprocessing_from_storage(
     fields: list[dict[str, Any]],
     histogram_bins: int = 8,
     histogram_bins_by_field: dict[str, int] | None = None,
+    detail_level: ProfileDetailLevel = "detailed",
 ) -> dict[str, Any]:
+    total_started_at = start_timer()
     metadata = await fetch_stored_file_metadata(file_id=dataset_file_id)
     body = await fetch_stored_file_body(file_id=dataset_file_id)
     resolved_filename = filename or metadata.get("original_name") or "dataset"
@@ -466,6 +602,7 @@ async def refresh_preprocessing_from_storage(
         rows=preprocessing["dataset"],
         histogram_bins=histogram_bins,
         histogram_bins_by_field=histogram_bins_by_field,
+        detail_level=detail_level,
     )
     refreshed_preview = _build_preview_from_processed(
         filename=resolved_filename,
@@ -473,8 +610,17 @@ async def refresh_preprocessing_from_storage(
         profile=profile,
         warnings=list(import_preview.get("warnings") or []),
     )
-    return {
+    result = {
         "preview": lightweight_preview(refreshed_preview),
         "profile": profile,
         "preprocessing_summary": preprocessing.get("summary") or {},
     }
+    pipeline_logger.info(
+        "refresh_preprocessing_from_storage_completed dataset_file_id=%r filename=%r fields_count=%r rows_total=%r duration_ms=%.2f",
+        dataset_file_id,
+        resolved_filename,
+        len(fields),
+        len(preprocessing.get("dataset") or []),
+        elapsed_ms(total_started_at),
+    )
+    return result

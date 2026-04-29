@@ -2,11 +2,12 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
+from app.core.logging import log_audit_event
 from app.db.session import get_db
 from app.schemas.files import (
     ComparisonHistoryCreate,
-    ComparisonHistoryResultFileUpdate,
     ComparisonHistoryRead,
+    ComparisonHistoryResultFileUpdate,
     FileRead,
     ProjectCreate,
     ProjectRead,
@@ -18,8 +19,8 @@ from app.services.file_service import (
     create_file_record,
     create_project,
     get_file,
-    list_files,
     list_comparison_history,
+    list_files,
     list_projects,
     storage_stats,
     update_comparison_history_result_file,
@@ -42,7 +43,7 @@ async def upload_file(
     body = await file.read()
     adapter = StorageAdapter()
     key, checksum = adapter.upload(file.filename or "file.bin", file.content_type, body, prefix=purpose)
-    return create_file_record(
+    item = create_file_record(
         db,
         original_name=file.filename or "file.bin",
         content_type=file.content_type,
@@ -51,6 +52,14 @@ async def upload_file(
         size_bytes=len(body),
         checksum=checksum,
     )
+    log_audit_event(
+        "file_uploaded",
+        file_id=item.id,
+        filename=item.original_name,
+        purpose=purpose,
+        size_bytes=len(body),
+    )
+    return item
 
 
 @router.get("/files/{file_id}", response_model=FileRead)
@@ -68,6 +77,7 @@ def download_file_content(file_id: int, db: Session = Depends(get_db)) -> Respon
         raise HTTPException(status_code=404, detail="File not found")
     adapter = StorageAdapter()
     body = adapter.download(item.storage_key)
+    log_audit_event("file_downloaded", file_id=item.id, filename=item.original_name, size_bytes=item.size_bytes)
     return Response(
         content=body,
         media_type=item.content_type or "application/octet-stream",
@@ -82,7 +92,15 @@ def read_projects(user_id: int | None = None, db: Session = Depends(get_db)) -> 
 
 @router.post("/projects", response_model=ProjectRead, status_code=201)
 def create_project_endpoint(payload: ProjectCreate, db: Session = Depends(get_db)) -> ProjectRead:
-    return create_project(db, payload)
+    project = create_project(db, payload)
+    log_audit_event(
+        "project_created",
+        project_id=project.id,
+        owner_user_id=project.owner_user_id,
+        owner_email=project.owner_email,
+        name=project.name,
+    )
+    return project
 
 
 @router.get("/comparison-history", response_model=list[ComparisonHistoryRead])
@@ -107,6 +125,11 @@ def update_comparison_history_result_file_endpoint(
     )
     if item is None:
         raise HTTPException(status_code=404, detail="Comparison history item not found")
+    log_audit_event(
+        "comparison_history_result_file_updated",
+        history_id=history_id,
+        result_file_id=payload.result_file_id,
+    )
     return item
 
 
@@ -115,7 +138,15 @@ def create_comparison_history_endpoint(
     payload: ComparisonHistoryCreate,
     db: Session = Depends(get_db),
 ) -> ComparisonHistoryRead:
-    return create_comparison_history(db, payload)
+    item = create_comparison_history(db, payload)
+    log_audit_event(
+        "comparison_history_created",
+        history_id=item.id,
+        user_id=item.user_id,
+        project_id=item.project_id,
+        title=item.title,
+    )
+    return item
 
 
 @router.get("/stats", response_model=StorageStats)

@@ -98,6 +98,7 @@ export async function previewFile(file: File): Promise<PreviewResponse> {
 export async function profileFile(file: File): Promise<PipelineProfileResponse> {
   const form = new FormData();
   form.append("file", file);
+  form.append("detail_level", "summary");
 
   const response = await fetch(`${ORCHESTRATOR_URL}/pipeline/upload-profile`, {
     method: "POST",
@@ -106,6 +107,30 @@ export async function profileFile(file: File): Promise<PipelineProfileResponse> 
 
   if (!response.ok) {
     throw new Error(await readError(response, "Не удалось построить профиль датасета"));
+  }
+
+  return response.json();
+}
+
+export async function fetchStoredProfile(
+  datasetFileId: number,
+  filename?: string,
+  options?: { histogramBins?: number; histogramBinsByField?: Record<string, number>; detailLevel?: "summary" | "detailed" },
+): Promise<PipelineProfileResponse> {
+  const response = await fetch(`${ORCHESTRATOR_URL}/pipeline/profile-stored`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      dataset_file_id: datasetFileId,
+      filename: filename || null,
+      histogram_bins: options?.histogramBins ?? 8,
+      histogram_bins_by_field: options?.histogramBinsByField ?? {},
+      profile_detail_level: options?.detailLevel ?? "detailed",
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(await readError(response, "Не удалось загрузить расширенный профиль датасета"));
   }
 
   return response.json();
@@ -187,7 +212,7 @@ export async function refreshPreprocessing(
   datasetFileId: number,
   fields: FieldConfig[],
   filename?: string,
-  options?: { histogramBins?: number; histogramBinsByField?: Record<string, number> },
+  options?: { histogramBins?: number; histogramBinsByField?: Record<string, number>; detailLevel?: "summary" | "detailed" },
 ): Promise<PreprocessingRefreshResponse> {
   const response = await fetch(`${ORCHESTRATOR_URL}/pipeline/preprocess-refresh`, {
     method: "POST",
@@ -198,6 +223,7 @@ export async function refreshPreprocessing(
       fields,
       histogram_bins: options?.histogramBins ?? 8,
       histogram_bins_by_field: options?.histogramBinsByField ?? {},
+      profile_detail_level: options?.detailLevel ?? "detailed",
     }),
   });
 

@@ -1,6 +1,7 @@
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+from app.schemas.preprocessing import ProfileDetailLevel
 
 
 class PipelineRow(BaseModel):
@@ -107,6 +108,7 @@ class PipelinePreprocessRefreshRequest(BaseModel):
     fields: list[FieldConfig]
     histogram_bins: int = Field(default=8, ge=2, le=64)
     histogram_bins_by_field: dict[str, int] = Field(default_factory=dict)
+    profile_detail_level: ProfileDetailLevel = "detailed"
 
 
 class PipelinePreprocessRefreshResponse(BaseModel):
@@ -119,6 +121,14 @@ class PipelineProfileStoredResponse(BaseModel):
     dataset_file_id: int
     preview: ImportedPreview
     profile: dict[str, Any]
+
+
+class PipelineStoredProfileRequest(BaseModel):
+    filename: str | None = None
+    dataset_file_id: int
+    histogram_bins: int = Field(default=8, ge=2, le=64)
+    histogram_bins_by_field: dict[str, int] = Field(default_factory=dict)
+    profile_detail_level: ProfileDetailLevel = "detailed"
 
 
 class Contribution(BaseModel):

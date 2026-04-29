@@ -56,6 +56,10 @@ class StorageAdapter:
     def upload(self, filename: str, content_type: str | None, body: bytes, prefix: str = "uploads") -> tuple[str, str]:
         checksum = hashlib.sha256(body).hexdigest()
         key = f"{prefix}/{uuid4()}-{filename}"
+        self.put(key, body, content_type)
+        return key, checksum
+
+    def put(self, key: str, body: bytes, content_type: str | None = None) -> None:
         if self.local_mode:
             path = self.base_dir / key
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -64,7 +68,6 @@ class StorageAdapter:
             extra_args = {"ContentType": content_type} if content_type else None
             assert self.client is not None
             self.client.put_object(Bucket=self.bucket_name, Key=key, Body=body, **(extra_args or {}))
-        return key, checksum
 
     def download(self, key: str) -> bytes:
         if self.local_mode:
@@ -72,6 +75,16 @@ class StorageAdapter:
         assert self.client is not None
         response = self.client.get_object(Bucket=self.bucket_name, Key=key)
         return response["Body"].read()
+
+    def exists(self, key: str) -> bool:
+        if self.local_mode:
+            return (self.base_dir / key).exists()
+        assert self.client is not None
+        try:
+            self.client.head_object(Bucket=self.bucket_name, Key=key)
+            return True
+        except ClientError:
+            return False
 
     def presigned_download_url(self, key: str, expires_in: int = 3600) -> str:
         if self.local_mode:

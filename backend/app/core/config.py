@@ -8,6 +8,10 @@ class Settings(BaseSettings):
     app_env: str = "dev"
     debug: bool = True
     api_prefix: str = "/api/v1"
+    log_level: str = "INFO"
+    log_file: str = "./logs/backend.log"
+    log_max_bytes: int = 5_242_880
+    log_backup_count: int = 5
     database_url: str = "postgresql+psycopg://postgres:postgres@backend-db:5432/analysis"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     jwt_secret: str = "local-dev-secret"

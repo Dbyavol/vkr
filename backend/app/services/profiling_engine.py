@@ -15,7 +15,10 @@ from app.schemas.preprocessing import (
     FieldConfig,
     FieldProfile,
     FieldRecommendation,
+    ProfileDetailLevel,
 )
+
+DETAILED_VISUAL_SAMPLE_LIMIT = 5000
 
 
 def _is_missing(value: Any) -> bool:
@@ -185,7 +188,16 @@ def _build_correlation_matrix(rows: list[Any], numeric_keys: list[str], limit: i
     return pairs[:limit]
 
 
-def _profile_field(key: str, values: list[Any], rows_total: int, max_unique_values: int, histogram_bins: int) -> FieldProfile:
+def _profile_field(
+    key: str,
+    values: list[Any],
+    visual_values: list[Any] | None,
+    rows_total: int,
+    max_unique_values: int,
+    histogram_bins: int,
+    *,
+    include_visuals: bool,
+) -> FieldProfile:
     missing_count = sum(1 for value in values if _is_missing(value))
     non_missing = [value for value in values if not _is_missing(value)]
     unique_values = sorted({str(value) for value in non_missing})
@@ -204,7 +216,7 @@ def _profile_field(key: str, values: list[Any], rows_total: int, max_unique_valu
     outlier_count = 0
     numeric_min = numeric_max = numeric_mean = numeric_median = None
     histogram: list[ChartPoint] = []
-    top_categories = _category_chart(values)
+    top_categories = _category_chart(visual_values if visual_values is not None else values) if include_visuals else []
 
     if inferred_type == "numeric" and numeric_values:
         ordered = sorted(numeric_values)
@@ -218,7 +230,13 @@ def _profile_field(key: str, values: list[Any], rows_total: int, max_unique_valu
         numeric_max = max(numeric_values)
         numeric_mean = mean(numeric_values)
         numeric_median = median(numeric_values)
-        histogram = _histogram(numeric_values, histogram_bins)
+        if include_visuals:
+            visual_numeric_values = [
+                numeric
+                for value in (visual_values if visual_values is not None else values)
+                if not _is_missing(value) and (numeric := _to_float(value)) is not None
+            ]
+            histogram = _histogram(visual_numeric_values or numeric_values, histogram_bins)
         recommendations.append(
             FieldRecommendation(
                 code="NORMALIZE_NUMERIC",
@@ -342,8 +360,27 @@ def _profile_field(key: str, values: list[Any], rows_total: int, max_unique_valu
     )
 
 
+def _sample_rows_for_detailed_visuals(rows: list[Any], limit: int = DETAILED_VISUAL_SAMPLE_LIMIT) -> list[Any]:
+    if len(rows) <= limit:
+        return rows
+    step = max(1, len(rows) // limit)
+    sampled = rows[::step]
+    return sampled[:limit]
+
+
+def _sample_values(values: list[Any], source_rows_total: int, limit: int = DETAILED_VISUAL_SAMPLE_LIMIT) -> list[Any]:
+    if len(values) <= limit or source_rows_total <= limit:
+        return values
+    step = max(1, len(values) // limit)
+    sampled = values[::step]
+    return sampled[:limit]
+
+
 def profile_dataset(payload: DatasetProfileRequest) -> DatasetProfileResponse:
     rows = payload.dataset.rows
+    detail_level: ProfileDetailLevel = payload.detail_level
+    include_visuals = detail_level == "detailed"
+    rows_for_visuals = _sample_rows_for_detailed_visuals(rows) if include_visuals else rows
     keys = sorted({key for row in rows for key in row.values.keys()})
     bins_by_field = {
         key: max(2, min(64, int(value)))
@@ -353,9 +390,11 @@ def profile_dataset(payload: DatasetProfileRequest) -> DatasetProfileResponse:
         _profile_field(
             key,
             [row.values.get(key) for row in rows],
+            _sample_values([row.values.get(key) for row in rows_for_visuals], len(rows)) if include_visuals else None,
             len(rows),
             payload.max_unique_values,
             bins_by_field.get(key, payload.histogram_bins),
+            include_visuals=include_visuals,
         )
         for key in keys
     ]
@@ -363,12 +402,13 @@ def profile_dataset(payload: DatasetProfileRequest) -> DatasetProfileResponse:
     numeric_keys = [field.key for field in fields if field.inferred_type == "numeric"]
     return DatasetProfileResponse(
         rows_total=len(rows),
+        detail_level=detail_level,
         fields=fields,
         quality=_quality_report(fields, len(rows)),
         recommended_weights=weights,
         weight_notes=notes,
-        missing_matrix_preview=_build_missing_matrix(rows, keys),
-        correlation_matrix=_build_correlation_matrix(rows, numeric_keys),
+        missing_matrix_preview=_build_missing_matrix(rows_for_visuals, keys) if include_visuals else [],
+        correlation_matrix=_build_correlation_matrix(rows_for_visuals, numeric_keys) if include_visuals else [],
     )
 
 

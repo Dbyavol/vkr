@@ -490,6 +490,7 @@ const QUALITY_TEXT: Record<string, string> = {
   medium: "Среднее",
   poor: "Низкое",
   "Ready for analysis": "Готов к анализу",
+  "Usable, but review recommendations": "Можно использовать, но нужно проверить рекомендации по преёбработке",
   "Risky, preprocessing is recommended": "Есть риски, рекомендуется предобработка",
   "Not ready for reliable analysis": "Не готов к надежному анализу",
   "No fields are currently suitable for comparative analysis.": "Нет полей, подходящих для сравнительного анализа.",

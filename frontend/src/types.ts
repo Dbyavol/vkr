@@ -130,6 +130,7 @@ export type CriterionConfig = {
   type: "numeric" | "categorical" | "binary";
   direction: "maximize" | "minimize" | "target";
   scale_map?: Record<string, number>;
+  target_value?: unknown | null;
 };
 
 export type AnalysisFilters = {

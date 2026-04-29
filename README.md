@@ -1,6 +1,6 @@
 # Universal Comparative Analysis System
 
-Web-oriented microservice system for universal comparative analysis of structured datasets.
+Web-oriented modular monolith for universal comparative analysis of structured datasets.
 
 The system supports:
 
@@ -10,7 +10,7 @@ The system supports:
 - user registration, authorization and roles;
 - projects, comparison history and scenario versions;
 - result explanations, sensitivity metrics and DOCX/HTML/JSON reports;
-- PostgreSQL-backed services and S3-compatible file storage through MinIO.
+- PostgreSQL-backed backend and S3-compatible file storage through MinIO.
 
 ## Main Runtime
 
@@ -32,7 +32,7 @@ Run Docker smoke checks:
 .\scripts\test-docker.ps1
 ```
 
-The smoke script builds and starts the stack, waits for service health endpoints, logs in as the demo admin and checks the orchestrator dashboard.
+The smoke script builds and starts the stack, waits for backend and frontend health endpoints, logs in as the demo admin and checks the system dashboard.
 
 Both `start-docker.ps1` and `test-docker.ps1` first run:
 
@@ -45,12 +45,7 @@ This guarantees that old containers from a previous run do not affect the next l
 ## URLs
 
 - Frontend: [http://localhost:5173](http://localhost:5173)
-- Orchestrator API docs: [http://localhost:8050/docs](http://localhost:8050/docs)
-- Auth API docs: [http://localhost:8040/docs](http://localhost:8040/docs)
-- Import API docs: [http://localhost:8060/docs](http://localhost:8060/docs)
-- Storage API docs: [http://localhost:8070/docs](http://localhost:8070/docs)
-- Analysis API docs: [http://localhost:8080/docs](http://localhost:8080/docs)
-- Preprocessing API docs: [http://localhost:8090/docs](http://localhost:8090/docs)
+- Backend API docs: [http://localhost:8050/docs](http://localhost:8050/docs)
 - MinIO console: [http://localhost:9001](http://localhost:9001)
 
 Demo admin:
@@ -78,18 +73,13 @@ If Docker Desktop is already open, restart Docker Desktop from the tray menu and
 ## Docker Services
 
 - `frontend`: React/Vite user interface.
-- `orchestrator-service`: single backend entry point for the frontend.
-- `auth-service`: users, roles, login and registration.
-- `storage-service`: metadata, files, projects and comparison history.
-- `import-service`: CSV/XLSX/JSON parsing and preview.
-- `preprocessing-service`: profiling, quality scoring and data transformations.
-- `comparative-analysis-service`: ranking, analog search and explainability.
-- `auth-db`: PostgreSQL database for authorization.
-- `storage-db`: PostgreSQL database for storage metadata.
+- `backend`: unified FastAPI application with auth, storage, import, preprocessing and analysis modules.
+- `backend-db`: PostgreSQL database for the modular monolith.
 - `minio`: S3-compatible object storage for uploaded datasets and result artifacts.
 
 ## Project Files
 
+- [backend](backend): modular monolith backend.
 - [docker-compose.yml](docker-compose.yml): full Docker stack.
 - [scripts/start-docker.ps1](scripts/start-docker.ps1): build and start the stack.
 - [scripts/stop-docker.ps1](scripts/stop-docker.ps1): stop the stack.

@@ -1,0 +1,42 @@
+@startuml
+title Архитектура Информационно-Аналитической Системы
+
+skinparam componentStyle rectangle
+skinparam shadowing false
+skinparam packageStyle rectangle
+
+actor "Пользователь" as User
+
+rectangle "Frontend\nReact / TypeScript" as Frontend
+
+package "Backend\nFastAPI (Модульный Монолит)" as Backend {
+  [Модуль Авторизации] as Auth
+  [Модуль Импорта Данных] as Import
+  [Модуль Предобработки] as Prep
+  [Модуль Сравнительного Анализа] as Analysis
+  [Модуль Хранения И Истории] as Storage
+  [Модуль Отчетности] as Reports
+  database "PostgreSQL" as DB
+  cloud "MinIO / S3" as S3
+}
+
+database "PostgreSQL" as DB
+cloud "MinIO / S3" as S3
+
+User --> Frontend
+Frontend --> Backend
+
+Auth --> DB
+Import --> S3
+Import --> DB
+Prep --> DB
+Analysis --> DB
+Storage --> DB
+Storage --> S3
+Reports --> DB
+Reports --> S3
+
+Import --> Prep
+Prep --> Analysis
+Analysis --> Storage
+Storage --> Reports

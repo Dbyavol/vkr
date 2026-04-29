@@ -1,7 +1,0 @@
-{
-  "name": "Demo Dataset",
-  "description": "Метаданные набора данных для последующей предобработки и анализа",
-  "row_count": 1000,
-  "status": "ready",
-  "schema_json": "{\"columns\": [\"price\", \"area\", \"condition\", \"parking\"]}"
-}

@@ -1,0 +1,157 @@
+@startuml
+allowmixing
+hide circle
+skinparam linetype ortho
+skinparam shadowing false
+skinparam packageStyle rectangle
+skinparam class {
+  BackgroundColor #F8FAFC
+  BorderColor #334155
+  ArrowColor #475569
+}
+
+package "PostgreSQL: analysis (single DB)" {
+  entity "users" as users {
+    * id : int <<PK>>
+    --
+    email : varchar(255) <<UQ, IDX>>
+    full_name : varchar(255)
+    password_hash : varchar(255)
+    role : varchar(50) <<IDX>>
+    is_active : bool
+    created_at : timestamptz
+    last_login_at : timestamptz
+  }
+
+  entity "object_types" as object_types {
+    * id : int <<PK>>
+    --
+    name : varchar(100) <<UQ, IDX>>
+    code : varchar(100) <<UQ, IDX>>
+    description : text
+    is_active : bool
+    created_at : timestamptz
+    updated_at : timestamptz
+  }
+
+  entity "objects" as objects {
+    * id : int <<PK>>
+    --
+    title : varchar(255) <<IDX>>
+    external_id : varchar(255) <<IDX>>
+    object_type_id : int <<FK>>
+    description : text
+    source : varchar(255)
+    status : varchar(50)
+    is_active : bool <<IDX>>
+    created_at : timestamptz
+    updated_at : timestamptz
+  }
+
+  entity "object_attributes" as object_attributes {
+    * id : int <<PK>>
+    --
+    object_id : int <<FK, IDX>>
+    key : varchar(100) <<IDX>>
+    label : varchar(255)
+    value_type : varchar(50)
+    value_string : text
+    value_number : varchar(100)
+    value_boolean : bool
+    value_json : text
+    unit : varchar(50)
+    is_filterable : bool
+    is_analytic : bool
+    created_at : timestamptz
+    updated_at : timestamptz
+  }
+
+  entity "stored_files" as stored_files {
+    * id : int <<PK>>
+    --
+    original_name : varchar(255)
+    content_type : varchar(100)
+    purpose : varchar(50)
+    storage_key : varchar(500) <<UQ, IDX>>
+    bucket_name : varchar(100)
+    size_bytes : bigint
+    checksum : varchar(128)
+    metadata_json : text
+    created_at : timestamptz
+    updated_at : timestamptz
+  }
+
+  entity "datasets" as datasets {
+    * id : int <<PK>>
+    --
+    name : varchar(255) <<IDX>>
+    description : text
+    object_type_id : int <<FK>>
+    source_file_id : int <<FK>>
+    row_count : int
+    status : varchar(50)
+    schema_json : text
+    created_at : timestamptz
+    updated_at : timestamptz
+  }
+
+  entity "projects" as projects {
+    * id : int <<PK>>
+    --
+    owner_user_id : int <<IDX>>
+    owner_email : varchar(255) <<IDX>>
+    name : varchar(255) <<IDX>>
+    description : text
+    status : varchar(50)
+    metadata_json : text
+    created_at : timestamptz
+    updated_at : timestamptz
+  }
+
+  entity "comparison_history" as comparison_history {
+    * id : int <<PK>>
+    --
+    user_id : int <<IDX>>
+    user_email : varchar(255) <<IDX>>
+    title : varchar(255)
+    source_filename : varchar(255)
+    project_id : int <<FK, IDX>>
+    version_number : int
+    parent_history_id : int <<FK>>
+    dataset_file_id : int <<FK>>
+    result_file_id : int <<FK>>
+    parameters_json : text
+    summary_json : text
+    tags_json : text
+    status : varchar(50)
+    created_at : timestamptz
+    updated_at : timestamptz
+  }
+}
+
+cloud "S3 / MinIO" as s3 {
+  rectangle "Physical object storage\n(bucket_name + storage_key)" as s3_objects
+}
+
+object_types ||--o{ objects : object_type_id
+objects ||--o{ object_attributes : object_id
+object_types ||--o{ datasets : object_type_id
+stored_files ||--o{ datasets : source_file_id
+projects ||--o{ comparison_history : project_id
+comparison_history ||--o{ comparison_history : parent_history_id
+stored_files ||--o{ comparison_history : dataset_file_id
+stored_files ||--o{ comparison_history : result_file_id
+
+stored_files ..> s3_objects : bucket_name + storage_key
+
+note right of projects
+Logical link: owner_user_id -> users.id
+(not declared as DB FK in current ORM)
+end note
+
+note right of comparison_history
+Logical link: user_id -> users.id
+(not declared as DB FK in current ORM)
+end note
+
+@enduml

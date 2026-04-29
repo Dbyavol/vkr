@@ -3,8 +3,12 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
-. (Join-Path $PSScriptRoot "docker-common.ps1")
-Assert-DockerEngine
+try {
+    docker info | Out-Null
+}
+catch {
+    throw "Docker Desktop engine is not running. Start Docker Desktop and wait until the engine becomes available, then run .\scripts\test-docker.ps1 again."
+}
 
 function Wait-Http {
     param(
@@ -29,16 +33,11 @@ function Wait-Http {
 docker compose down --remove-orphans
 docker compose up --build -d
 
-Wait-Http "http://localhost:8040/health" "auth-service"
-Wait-Http "http://localhost:8050/health" "orchestrator-service"
-Wait-Http "http://localhost:8060/health" "import-service"
-Wait-Http "http://localhost:8070/health" "storage-service"
-Wait-Http "http://localhost:8080/health" "comparative-analysis-service"
-Wait-Http "http://localhost:8090/health" "preprocessing-service"
+Wait-Http "http://localhost:8050/health" "backend"
 Wait-Http "http://localhost:5173" "frontend"
 
 $login = Invoke-RestMethod `
-    -Uri "http://localhost:8040/api/v1/auth/login" `
+    -Uri "http://localhost:8050/api/v1/auth/login" `
     -Method Post `
     -ContentType "application/json" `
     -Body (@{ email = "admin@example.com"; password = "admin12345" } | ConvertTo-Json)

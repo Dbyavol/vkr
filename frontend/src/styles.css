@@ -1764,15 +1764,17 @@ th {
 .result-bars {
   display: grid;
   gap: 12px;
+  align-items: stretch;
 }
 
 .result-bar {
   width: 100%;
   display: grid;
-  grid-template-columns: 42px minmax(110px, 0.6fr) minmax(160px, 1fr) 70px;
+  grid-template-columns: 48px minmax(180px, 1fr) minmax(220px, 2fr) minmax(78px, auto);
   align-items: center;
   gap: 12px;
-  padding: 12px 14px;
+  min-height: 58px;
+  padding: 12px 16px;
   border: 1px solid rgba(148, 163, 184, 0.16);
   border-radius: 18px;
   color: var(--ink);
@@ -1801,8 +1803,8 @@ th {
 .result-bar-rank {
   display: grid;
   place-items: center;
-  width: 34px;
-  height: 34px;
+  width: 38px;
+  height: 38px;
   border-radius: 12px;
   color: #ffffff;
   background: linear-gradient(135deg, var(--blue), var(--cyan));
@@ -1837,6 +1839,7 @@ th {
 .result-bar strong {
   color: var(--blue);
   text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 .chart-pagination {
@@ -1844,9 +1847,22 @@ th {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-top: 16px;
+  margin-top: 18px;
   padding-top: 14px;
   border-top: 1px solid var(--line);
+}
+
+.chart-page-info {
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.chart-pagination-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
 }
 
 .page-pills {
@@ -2058,6 +2074,28 @@ th {
   height: 100%;
   border-radius: inherit;
   background: linear-gradient(90deg, var(--blue), var(--green));
+}
+
+.subtle-panel {
+  padding: 14px 16px;
+  margin-bottom: 14px;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.compact-head {
+  margin-bottom: 10px;
+}
+
+.compact-head h3 {
+  margin: 4px 0 6px;
+}
+
+.compact-head p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .history-list {
@@ -2540,6 +2578,16 @@ th {
   .chart-head,
   .result-title {
     display: grid;
+  }
+
+  .chart-pagination,
+  .chart-pagination-controls {
+    display: grid;
+    justify-content: stretch;
+  }
+
+  .chart-page-info {
+    white-space: normal;
   }
 
   .chart-head small,

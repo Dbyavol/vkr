@@ -17,6 +17,6 @@ def test_profile_dataset_returns_quality_and_recommendations():
 
     assert profile.rows_total == 3
     assert profile.quality.score <= 100
-    assert any(field.key == "price" and field.inferred_type == "numeric" for field in profile.fields)
+    assert any(field.key == "price" and field.inferred_type == "integer" for field in profile.fields)
     assert any(field.key == "district" and field.inferred_type == "categorical" for field in profile.fields)
     assert "price" in profile.recommended_weights

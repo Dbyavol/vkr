@@ -98,7 +98,7 @@ export async function previewFile(file: File): Promise<PreviewResponse> {
 export async function profileFile(file: File): Promise<PipelineProfileResponse> {
   const form = new FormData();
   form.append("file", file);
-  form.append("detail_level", "summary");
+  form.append("detail_level", "preview");
 
   const response = await fetch(`${ORCHESTRATOR_URL}/pipeline/upload-profile`, {
     method: "POST",
@@ -151,13 +151,14 @@ export async function runPipeline(
   filterCriteria?: AnalysisFilters,
   includeStabilityScenarios = false,
   stabilityVariationPct = 10,
+  topN = 10,
 ): Promise<PipelineResult> {
   const config = {
     fields,
     criteria,
     target_row_id: targetRowId || null,
     analysis_mode: analysisMode,
-    top_n: 10,
+    top_n: Math.max(1, Math.floor(topN)),
     filter_criteria: filterCriteria ?? null,
     include_stability_scenarios: includeStabilityScenarios,
     stability_variation_pct: stabilityVariationPct,

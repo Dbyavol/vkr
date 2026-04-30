@@ -1,4 +1,4 @@
-export type InferredType = "numeric" | "categorical" | "binary" | "text" | "datetime";
+export type InferredType = "numeric" | "integer" | "float" | "categorical" | "binary" | "text" | "datetime";
 export type AnalysisMode = "rating" | "analog_search";
 
 export type PreviewColumn = {
@@ -120,6 +120,8 @@ export type FieldConfig = {
   outlier_threshold: number;
   normalization: string;
   encoding: string;
+  rounding_precision?: number | null;
+  datetime_format?: string | null;
   ordinal_map?: Record<string, number>;
   binary_map?: Record<string, number>;
 };
@@ -202,6 +204,23 @@ export type SystemDashboard = {
   services: Record<string, { status: string; status_code?: number; message?: string }>;
   storage: StorageStats | null;
   auth: AdminStats | null;
+  telemetry?: {
+    window_size: number;
+    overall: {
+      requests: number;
+      errors: number;
+      error_rate_pct: number;
+      avg_ms: number;
+    };
+    modules: Array<{
+      module: string;
+      requests: number;
+      errors: number;
+      error_rate_pct: number;
+      avg_ms: number;
+      p95_ms: number;
+    }>;
+  };
 };
 
 export type AuthUser = {

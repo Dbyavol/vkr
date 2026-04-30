@@ -20,6 +20,7 @@ from app.core.logging import (
     log_audit_event,
     start_timer,
 )
+from app.core.telemetry import record_request
 from app.db.base import Base
 from app.db.session import SessionLocal, engine
 from app.models import files, objects, user  # noqa: F401
@@ -42,7 +43,7 @@ from app.services.pipeline_engine import (
     run_pipeline_via_services,
     upload_and_profile_dataset,
 )
-from app.services.profile_artifact_service import build_and_cache_detailed_profile_artifact
+from app.services.dataset_artifact_service import build_and_cache_raw_detailed_profile_artifact
 from app.services.user_service import bootstrap_admin
 
 settings = get_settings()
@@ -139,6 +140,7 @@ async def request_logging_middleware(request: Request, call_next):
         identity.get("user_email"),
         duration_ms,
     )
+    record_request(request.url.path, duration_ms, response.status_code)
     return response
 
 
@@ -265,9 +267,10 @@ async def pipeline_upload_profile(
         )
         if detail_level != "detailed" and data.get("dataset_file_id"):
             background_tasks.add_task(
-                build_and_cache_detailed_profile_artifact,
+                build_and_cache_raw_detailed_profile_artifact,
                 dataset_file_id=int(data["dataset_file_id"]),
                 filename=file.filename or "dataset",
+                source_body=body,
             )
         return PipelineProfileStoredResponse.model_validate(data)
     except ValueError as exc:
@@ -375,7 +378,10 @@ async def pipeline_run_stored(
 
 
 @app.post(f"{settings.api_prefix}/pipeline/preprocess-refresh", response_model=PipelinePreprocessRefreshResponse)
-async def pipeline_preprocess_refresh(payload: PipelinePreprocessRefreshRequest) -> PipelinePreprocessRefreshResponse:
+async def pipeline_preprocess_refresh(
+    payload: PipelinePreprocessRefreshRequest,
+    background_tasks: BackgroundTasks,
+) -> PipelinePreprocessRefreshResponse:
     try:
         data = await refresh_preprocessing_from_storage(
             dataset_file_id=payload.dataset_file_id,
@@ -385,6 +391,16 @@ async def pipeline_preprocess_refresh(payload: PipelinePreprocessRefreshRequest)
             histogram_bins_by_field=payload.histogram_bins_by_field,
             detail_level=payload.profile_detail_level,
         )
+        if payload.profile_detail_level != "detailed":
+            background_tasks.add_task(
+                refresh_preprocessing_from_storage,
+                dataset_file_id=payload.dataset_file_id,
+                filename=payload.filename,
+                fields=[field.model_dump() for field in payload.fields],
+                histogram_bins=payload.histogram_bins,
+                histogram_bins_by_field=payload.histogram_bins_by_field,
+                detail_level="detailed",
+            )
         log_audit_event(
             "pipeline_preprocess_refresh",
             dataset_file_id=payload.dataset_file_id,

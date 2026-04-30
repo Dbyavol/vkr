@@ -39,6 +39,15 @@ import type {
 type StageId = "data" | "preprocessing" | "criteria" | "results" | "projects" | "history" | "admin";
 type PrepSectionId = "types" | "missing" | "outliers" | "encoding" | "scaling";
 type ChartMode = "histogram" | "boxplot";
+const DATETIME_FORMAT_OPTIONS = [
+  "YYYY-MM-DD",
+  "YYYY/MM/DD",
+  "DD.MM.YYYY",
+  "DD-MM-YYYY",
+  "YYYY-MM-DD HH:mm:ss",
+  "YYYY/MM/DD HH:mm:ss",
+  "DD.MM.YYYY HH:mm:ss",
+] as const;
 
 const stages: Array<{ id: StageId; title: string; caption: string }> = [
   { id: "data", title: "Данные", caption: "Загрузка и предпросмотр" },
@@ -57,16 +66,30 @@ const prepSections: Array<{ id: PrepSectionId; title: string; caption: string }>
 ];
 
 const numericNameHints = ["price", "cost", "area", "rating", "score", "days", "months", "amount", "value"];
-const minimizeHints = ["price", "cost", "distance", "time", "days", "risk", "loss"];
 
 function looksNumeric(column: PreviewColumn) {
   const samples = column.sample_values.filter((value) => value !== null && value !== "");
-  if (samples.length === 0) return column.inferred_type === "numeric";
+  if (samples.length === 0) return ["numeric", "integer", "float"].includes(column.inferred_type);
   return samples.every((value) => !Number.isNaN(Number(String(value).replace(",", "."))));
 }
 
+function isIntegerLikeColumn(column: PreviewColumn) {
+  const samples = column.sample_values.filter((value) => value !== null && value !== "");
+  if (samples.length === 0) return column.inferred_type === "integer";
+  return samples.every((value) => {
+    const parsed = Number(String(value).replace(",", "."));
+    return Number.isFinite(parsed) && Number.isInteger(parsed);
+  });
+}
+
+function isNumericFieldType(fieldType: FieldConfig["field_type"]) {
+  return fieldType === "numeric" || fieldType === "integer" || fieldType === "float";
+}
+
 function inferUiType(column: PreviewColumn): FieldConfig["field_type"] {
-  if (looksNumeric(column) || numericNameHints.some((hint) => column.normalized_name.includes(hint))) return "numeric";
+  if (looksNumeric(column) || numericNameHints.some((hint) => column.normalized_name.includes(hint))) {
+    return isIntegerLikeColumn(column) ? "integer" : "float";
+  }
   return column.inferred_type;
 }
 
@@ -74,9 +97,41 @@ function uniqueSamples(column: PreviewColumn) {
   return Array.from(new Set(column.sample_values.filter((value) => value !== null && value !== "").map(String)));
 }
 
+function categoriesForField(preview: PreviewResponse | null, key: string, column?: PreviewColumn) {
+  const fromRows = Array.from(
+    new Set(
+      (preview?.normalized_dataset?.rows ?? [])
+        .map((row) => row.values[key])
+        .filter((value) => value !== null && value !== undefined && value !== "")
+        .map(String),
+    ),
+  );
+  if (fromRows.length) return fromRows;
+  return column ? uniqueSamples(column) : [];
+}
+
 function buildOrdinalMap(samples: string[]) {
   if (!samples.length) return undefined;
   return Object.fromEntries(samples.map((value, index) => [value, Number(((index + 1) / samples.length).toFixed(2))]));
+}
+
+function applyModeDefaultsToCriteria(criteria: CriterionConfig[], mode: AnalysisMode): CriterionConfig[] {
+  return criteria.map((criterion) => ({
+    ...criterion,
+    direction: mode === "analog_search" ? "target" : "maximize",
+  }));
+}
+
+function enforceRequiredScaling(fields: FieldConfig[]): FieldConfig[] {
+  let changed = false;
+  const next = fields.map((field) => {
+    if (isNumericFieldType(field.field_type) && (field.normalization === "none" || field.normalization === "")) {
+      changed = true;
+      return { ...field, normalization: "minmax" };
+    }
+    return field;
+  });
+  return changed ? next : fields;
 }
 
 function fieldDefaults(column: PreviewColumn): FieldConfig {
@@ -89,8 +144,10 @@ function fieldDefaults(column: PreviewColumn): FieldConfig {
     missing_strategy: "none",
     outlier_method: "none",
     outlier_threshold: 1.5,
-    normalization: "none",
+    normalization: isNumericFieldType(fieldType) ? "minmax" : "none",
     encoding: "none",
+    rounding_precision: fieldType === "float" ? 2 : null,
+    datetime_format: fieldType === "datetime" ? "YYYY-MM-DD" : null,
     ordinal_map: fieldType === "categorical" ? buildOrdinalMap(categories) : undefined,
     binary_map: fieldType === "binary" ? { true: 1, false: 0, "1": 1, "0": 0 } : undefined,
   };
@@ -349,6 +406,14 @@ function downloadBlob(filename: string, content: string, type: string) {
   URL.revokeObjectURL(url);
 }
 
+function escapeCsvCell(value: unknown) {
+  const text = String(value ?? "");
+  if (text.includes('"') || text.includes(",") || text.includes("\n") || text.includes("\r")) {
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+  return text;
+}
+
 function formatPreviewCell(value: unknown) {
   if (value === null || value === undefined || value === "") {
     return "Пусто";
@@ -402,12 +467,7 @@ function criteriaDefaults(
     name: field.key.replace(/_/g, " "),
     weight: recommendedWeights?.[field.key] ?? fallbackWeight,
     type: field.field_type === "categorical" ? "categorical" : field.field_type === "binary" ? "binary" : "numeric",
-    direction:
-      analysisMode === "analog_search"
-        ? "target"
-        : minimizeHints.some((hint) => field.key.includes(hint))
-          ? "minimize"
-          : "maximize",
+    direction: analysisMode === "analog_search" ? "target" : "maximize",
     scale_map: field.ordinal_map ?? field.binary_map,
   }));
 }
@@ -473,6 +533,11 @@ const SERVICE_LABELS: Record<string, string> = {
   preprocessing: "Предобработка",
   analysis: "Анализ",
   storage: "Хранилище",
+  pipeline: "Пайплайн",
+  reports: "Отчеты",
+  objects: "Объекты",
+  system: "Система",
+  other: "Прочее",
 };
 
 const STATUS_LABELS: Record<string, string> = {
@@ -502,6 +567,8 @@ const QUALITY_TEXT: Record<string, string> = {
 
 const FIELD_TYPE_LABELS: Record<string, string> = {
   numeric: "Числовой",
+  integer: "Целое Число",
+  float: "Дробное Число",
   categorical: "Категориальный",
   binary: "Бинарный",
   text: "Текстовый",
@@ -618,6 +685,38 @@ type HistoryParameters = {
   project_id?: number | null;
   scenario_title?: string | null;
 };
+
+const EMPTY_PREVIEW_RESPONSE: PreviewResponse = {
+  filename: "",
+  rows_total: 0,
+  columns: [],
+  preview_rows: [],
+  warnings: [],
+};
+
+function normalizePipelineResult(result: PipelineResult | null | undefined): PipelineResult | null {
+  if (!result) return null;
+  return {
+    import_preview: result.import_preview ?? EMPTY_PREVIEW_RESPONSE,
+    preprocessing_summary: result.preprocessing_summary ?? {},
+    analysis_summary: result.analysis_summary ?? {},
+    history_id: result.history_id ?? null,
+    ranking: Array.isArray(result.ranking) ? result.ranking : [],
+  };
+}
+
+function compactPipelineResultForStorage(result: PipelineResult | null | undefined): PipelineResult | null {
+  const normalized = normalizePipelineResult(result);
+  if (!normalized) return null;
+  return {
+    ...normalized,
+    import_preview: EMPTY_PREVIEW_RESPONSE,
+    ranking: normalized.ranking.slice(0, 48).map((item) => ({
+      ...item,
+      contributions: item.contributions.slice(0, 12),
+    })),
+  };
+}
 
 type SavedWorkflowState = {
   activeStage?: StageId;
@@ -817,6 +916,49 @@ function objectValueLabel(value: unknown) {
   return String(value);
 }
 
+function buildSortedDatasetCsv(result: PipelineResult, criteria: CriterionConfig[], mode: AnalysisMode) {
+  const headers = [
+    "rank",
+    "object_id",
+    "title",
+    "score",
+    "similarity_to_target",
+    ...criteria.flatMap((criterion) => [
+      `${criterion.key}_raw`,
+      `${criterion.key}_normalized`,
+      `${criterion.key}_contribution`,
+    ]),
+  ];
+
+  const rows = result.ranking.map((item) => {
+    const contributionByKey = new Map(item.contributions.map((contribution) => [contribution.key, contribution]));
+    const scoreValue = mode === "analog_search" && item.similarity_to_target !== null && item.similarity_to_target !== undefined
+      ? item.similarity_to_target
+      : item.score;
+    return [
+      item.rank,
+      item.object_id,
+      item.title,
+      Number(scoreValue).toFixed(6),
+      item.similarity_to_target === null || item.similarity_to_target === undefined ? "" : Number(item.similarity_to_target).toFixed(6),
+      ...criteria.flatMap((criterion) => {
+        const contribution = contributionByKey.get(criterion.key);
+        if (!contribution) {
+          return ["", "", ""];
+        }
+        return [
+          objectValueLabel(contribution.raw_value),
+          Number(contribution.normalized_value).toFixed(6),
+          Number(contribution.contribution).toFixed(6),
+        ];
+      }),
+    ];
+  });
+
+  const lines = [headers, ...rows].map((line) => line.map(escapeCsvCell).join(","));
+  return lines.join("\n");
+}
+
 function ResultBarChart({
   result,
   mode,
@@ -873,25 +1015,28 @@ function ResultBarChart({
       </div>
       {totalPages > 1 ? (
         <div className="chart-pagination">
-          <button className="ghost-button" onClick={() => onPageChange(safePage - 1)} disabled={safePage <= 1}>
-            Назад
-          </button>
-          <div className="page-pills">
-            {Array.from({ length: totalPages }, (_, index) => index + 1)
-              .slice(Math.max(0, safePage - 3), Math.min(totalPages, safePage + 2))
-              .map((page) => (
-                <button
-                  key={page}
-                  className={`page-pill ${page === safePage ? "active" : ""}`}
-                  onClick={() => onPageChange(page)}
-                >
-                  {page}
-                </button>
-              ))}
+          <div className="chart-page-info">Страница {safePage} из {totalPages}</div>
+          <div className="chart-pagination-controls">
+            <button className="ghost-button" onClick={() => onPageChange(safePage - 1)} disabled={safePage <= 1}>
+              Назад
+            </button>
+            <div className="page-pills">
+              {Array.from({ length: totalPages }, (_, index) => index + 1)
+                .slice(Math.max(0, safePage - 3), Math.min(totalPages, safePage + 2))
+                .map((page) => (
+                  <button
+                    key={page}
+                    className={`page-pill ${page === safePage ? "active" : ""}`}
+                    onClick={() => onPageChange(page)}
+                  >
+                    {page}
+                  </button>
+                ))}
+            </div>
+            <button className="ghost-button" onClick={() => onPageChange(safePage + 1)} disabled={safePage >= totalPages}>
+              Далее
+            </button>
           </div>
-          <button className="ghost-button" onClick={() => onPageChange(safePage + 1)} disabled={safePage >= totalPages}>
-            Далее
-          </button>
         </div>
       ) : null}
     </div>
@@ -978,6 +1123,7 @@ export function App() {
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [reportPreviewOpen, setReportPreviewOpen] = useState(false);
+  const [reportPreviewHtml, setReportPreviewHtml] = useState("");
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [authEmail, setAuthEmail] = useState("admin@example.com");
   const [authPassword, setAuthPassword] = useState("admin12345");
@@ -1010,7 +1156,7 @@ export function App() {
   const [criteria, setCriteria] = useState<CriterionConfig[]>(savedWorkflow.criteria ?? []);
   const [analysisMode, setAnalysisMode] = useState<AnalysisMode>(savedWorkflow.analysisMode ?? "analog_search");
   const [targetRowId, setTargetRowId] = useState(savedWorkflow.targetRowId ?? "");
-  const [result, setResult] = useState<PipelineResult | null>(savedWorkflow.result ?? null);
+  const [result, setResult] = useState<PipelineResult | null>(() => normalizePipelineResult(savedWorkflow.result ?? null));
   const [selectedResultId, setSelectedResultId] = useState(savedWorkflow.result?.ranking?.[0]?.object_id ?? "");
   const [resultsPage, setResultsPage] = useState(1);
   const [lastHistoryId, setLastHistoryId] = useState<number | null>(savedWorkflow.lastHistoryId ?? null);
@@ -1044,7 +1190,6 @@ export function App() {
   const comparedHistory = historyCompareIds
     .map((id) => history.find((item) => item.id === id))
     .filter((item): item is ComparisonHistoryItem => Boolean(item));
-  const reportHtml = useMemo(() => (result ? buildHtmlReport(result, criteria) : ""), [result, criteria]);
   const selectedResult = useMemo(
     () => result?.ranking.find((item) => item.object_id === selectedResultId) ?? result?.ranking[0],
     [result, selectedResultId],
@@ -1062,14 +1207,14 @@ export function App() {
     return rows.filter((row) => ids.has(row.id)).slice(0, 14);
   }, [preview, missingMatrixPreview]);
   const fullDatasetOutlierTotal = useMemo(
-    () => profile.filter((field) => field.inferred_type === "numeric").reduce((sum, field) => sum + field.outlier_count_iqr, 0),
+    () => profile.filter((field) => ["numeric", "integer", "float"].includes(field.inferred_type)).reduce((sum, field) => sum + field.outlier_count_iqr, 0),
     [profile],
   );
   const histogramBinsForRefresh = useMemo(
     () =>
       Object.fromEntries(
         fields
-          .filter((field) => field.field_type === "numeric")
+          .filter((field) => isNumericFieldType(field.field_type))
           .map((field) => [field.key, Math.min(64, Math.max(2, histogramBinsByField[field.key] ?? 8))]),
       ),
     [fields, histogramBinsByField],
@@ -1143,7 +1288,12 @@ export function App() {
   }
 
   function updateFieldNormalization(index: number, normalization: FieldConfig["normalization"]) {
-    updateField(index, { normalization });
+    updateField(index, { normalization: normalization === "none" ? "minmax" : normalization });
+  }
+
+  function updateAnalysisMode(nextMode: AnalysisMode) {
+    setAnalysisMode(nextMode);
+    setCriteria((current) => applyModeDefaultsToCriteria(current, nextMode));
   }
 
   function applyHistogramBins(fieldKey: string) {
@@ -1291,14 +1441,14 @@ export function App() {
             ...field.recommended_config,
             missing_strategy: "none",
             outlier_method: "none",
-            normalization: "none",
+            normalization: isNumericFieldType(field.recommended_config.field_type) ? "minmax" : "none",
             encoding: "none",
           }))
         : preview.columns.map((column) => fieldDefaults(column));
       setFields(nextFields);
       const nextHistogramBinsByField = Object.fromEntries(
         nextFields
-          .filter((field) => field.field_type === "numeric")
+          .filter((field) => isNumericFieldType(field.field_type))
           .map((field) => [field.key, Math.min(64, Math.max(2, histogramBinsByField[field.key] ?? 8))]),
       );
       setHistogramBinsByField(nextHistogramBinsByField);
@@ -1335,7 +1485,7 @@ export function App() {
       criteria,
       analysisMode,
       targetRowId,
-      result,
+      result: compactPipelineResultForStorage(result),
       activeProjectId,
       historyProjectFilter,
       scenarioTitle,
@@ -1345,7 +1495,40 @@ export function App() {
       lastHistoryId,
       profileDetailLevel,
     };
-    localStorage.setItem(WORKFLOW_STORAGE_KEY, JSON.stringify(state));
+    try {
+      localStorage.setItem(WORKFLOW_STORAGE_KEY, JSON.stringify(state));
+    } catch (storageError) {
+      console.warn("Не удалось сохранить полное состояние workflow, сохраняем облегченный снимок.", storageError);
+      const fallbackState: SavedWorkflowState = {
+        activeStage,
+        datasetFileId,
+        preview,
+        profile,
+        quality,
+        recommendedWeights,
+        weightNotes,
+        missingMatrixPreview,
+        correlationMatrix,
+        fields,
+        criteria,
+        analysisMode,
+        targetRowId,
+        result: null,
+        activeProjectId,
+        historyProjectFilter,
+        scenarioTitle,
+        sourceFilename,
+        preprocessingSection,
+        histogramBinsByField,
+        lastHistoryId,
+        profileDetailLevel,
+      };
+      try {
+        localStorage.setItem(WORKFLOW_STORAGE_KEY, JSON.stringify(fallbackState));
+      } catch {
+        localStorage.removeItem(WORKFLOW_STORAGE_KEY);
+      }
+    }
   }, [
     activeStage,
     datasetFileId,
@@ -1493,10 +1676,11 @@ export function App() {
 
       const nextFields = Array.isArray(parameters.fields) ? parameters.fields : [];
       const nextCriteria = Array.isArray(parameters.criteria) ? parameters.criteria : [];
+      const normalizedFields = enforceRequiredScaling(nextFields);
 
       setFile(null);
-      setFields(nextFields);
-      setCriteria(nextCriteria.length ? nextCriteria : criteriaDefaults(nextFields, recommendedWeights, parameters.analysis_mode === "rating" ? "rating" : "analog_search"));
+      setFields(normalizedFields);
+      setCriteria(nextCriteria.length ? nextCriteria : criteriaDefaults(normalizedFields, recommendedWeights, parameters.analysis_mode === "rating" ? "rating" : "analog_search"));
       setTargetRowId(parameters.target_row_id ?? "");
       setAnalysisMode(parameters.analysis_mode === "rating" ? "rating" : "analog_search");
       setScenarioTitle(parameters.scenario_title ?? latest.title);
@@ -1506,11 +1690,11 @@ export function App() {
 
       if (latest.dataset_file_id && nextFields.length) {
         const nextHistogramBinsByField = Object.fromEntries(
-          nextFields
-            .filter((field) => field.field_type === "numeric")
+          normalizedFields
+            .filter((field) => isNumericFieldType(field.field_type))
             .map((field) => [field.key, Math.min(64, Math.max(2, histogramBinsByField[field.key] ?? 8))]),
         );
-        const response = await refreshPreprocessing(latest.dataset_file_id, nextFields, latest.source_filename ?? undefined, {
+        const response = await refreshPreprocessing(latest.dataset_file_id, normalizedFields, latest.source_filename ?? undefined, {
           histogramBinsByField: nextHistogramBinsByField,
         });
         setPreview(response.preview);
@@ -1558,13 +1742,13 @@ export function App() {
       return;
     }
     if (Array.isArray(parameters.fields)) {
-      setFields(parameters.fields);
+      setFields(enforceRequiredScaling(parameters.fields));
     }
     if (Array.isArray(parameters.criteria)) {
       setCriteria(parameters.criteria);
     }
     setTargetRowId(parameters.target_row_id ?? "");
-    setAnalysisMode(parameters.analysis_mode === "rating" ? "rating" : "analog_search");
+    updateAnalysisMode(parameters.analysis_mode === "rating" ? "rating" : "analog_search");
     setActiveProjectId(parameters.project_id ?? item.project_id ?? null);
     setScenarioTitle(`${item.title} (повтор)`);
     setActiveStage("criteria");
@@ -1592,15 +1776,13 @@ export function App() {
       setDatasetFileId(response.dataset_file_id ?? null);
       setSourceFilename(file.name);
       setPreview(response.preview);
-      applyProfileSnapshot(
-        response.profile.fields,
-        response.profile.quality,
-        response.profile.recommended_weights,
-        response.profile.weight_notes,
-        response.profile.missing_matrix_preview ?? [],
-        response.profile.correlation_matrix ?? [],
-        response.profile.detail_level === "detailed" ? "detailed" : "summary",
-      );
+      setProfile([]);
+      setQuality(null);
+      setRecommendedWeights({});
+      setWeightNotes([]);
+      setMissingMatrixPreview([]);
+      setCorrelationMatrix([]);
+      setProfileDetailLevel("summary");
       setFields([]);
       setCriteria([]);
       setHistogramBinsByField({});
@@ -1620,9 +1802,13 @@ export function App() {
     setLoading(true);
     setError(null);
     try {
+      const effectiveFields = enforceRequiredScaling(fields);
+      if (effectiveFields !== fields) {
+        setFields(effectiveFields);
+      }
       const response = await runPipeline(
         file,
-        fields,
+        effectiveFields,
         criteria,
         analysisMode === "analog_search" ? targetRowId : undefined,
         analysisMode,
@@ -1635,9 +1821,15 @@ export function App() {
         undefined,
         false,
         10,
+        Math.max(preview?.rows_total ?? 0, 10),
       );
-      setResult(response);
-      setSelectedResultId(response.ranking[0]?.object_id ?? "");
+      // Validate response shape to avoid runtime exceptions in the UI
+      if (!response || !Array.isArray(response.ranking)) {
+        throw new Error("Неверный формат ответа от сервера: отсутствует поле ranking");
+      }
+      setResult(normalizePipelineResult(response));
+      // Guard access to first item
+      setSelectedResultId(response.ranking.length > 0 && response.ranking[0] && response.ranking[0].object_id ? response.ranking[0].object_id : "");
       setResultsPage(1);
       setLastHistoryId(response.history_id ?? null);
       setActiveStage("results");
@@ -1664,7 +1856,11 @@ export function App() {
     setLoading(true);
     setError(null);
     try {
-      const response = await refreshPreprocessing(datasetFileId, fields, sourceFilename || preview?.filename || undefined, {
+      const effectiveFields = enforceRequiredScaling(fields);
+      if (effectiveFields !== fields) {
+        setFields(effectiveFields);
+      }
+      const response = await refreshPreprocessing(datasetFileId, effectiveFields, sourceFilename || preview?.filename || undefined, {
         histogramBinsByField: histogramBinsForRefresh,
         detailLevel: "summary",
       });
@@ -1679,7 +1875,7 @@ export function App() {
         response.profile.detail_level === "detailed" ? "detailed" : "summary",
       );
       setProfileDetailsLoading(true);
-      void refreshPreprocessing(datasetFileId, fields, sourceFilename || preview?.filename || undefined, {
+      void refreshPreprocessing(datasetFileId, effectiveFields, sourceFilename || preview?.filename || undefined, {
         histogramBinsByField: histogramBinsForRefresh,
         detailLevel: "detailed",
       })
@@ -1717,12 +1913,13 @@ export function App() {
       updateField(index, fieldProfile.recommended_config);
       return;
     }
-    if (field.field_type === "numeric") {
+    if (isNumericFieldType(field.field_type)) {
       updateField(index, {
         missing_strategy: "median",
         outlier_method: "iqr_clip",
         normalization: "minmax",
         encoding: "none",
+        rounding_precision: field.field_type === "float" ? (field.rounding_precision ?? 2) : null,
       });
       return;
     }
@@ -1792,6 +1989,16 @@ export function App() {
     }
   }
 
+  function buildCurrentReportHtml() {
+    return result ? buildHtmlReport(result, criteria) : "";
+  }
+
+  function openReportPreview() {
+    if (!result) return;
+    setReportPreviewHtml(buildCurrentReportHtml());
+    setReportPreviewOpen(true);
+  }
+
   function rebuildCriteria() {
     setCriteria(criteriaDefaults(fields, recommendedWeights, analysisMode));
     setActiveStage("criteria");
@@ -1799,7 +2006,7 @@ export function App() {
 
   function exportHtmlReport() {
     if (!result) return;
-    downloadBlob("comparison-report.html", reportHtml, "text/html;charset=utf-8");
+    downloadBlob("comparison-report.html", buildCurrentReportHtml(), "text/html;charset=utf-8");
   }
 
   async function storeReportFile(blob: Blob, filename: string) {
@@ -1830,6 +2037,7 @@ export function App() {
     setError(null);
     const mountNode = document.createElement("div");
     try {
+      const reportHtml = buildCurrentReportHtml();
       const parser = new DOMParser();
       const parsed = parser.parseFromString(reportHtml, "text/html");
       const bodyMarkup = parsed.body?.innerHTML || reportHtml;
@@ -1917,6 +2125,12 @@ export function App() {
       JSON.stringify({ generated_at: new Date().toISOString(), fields, criteria, result }, null, 2),
       "application/json;charset=utf-8",
     );
+  }
+
+  function exportSortedDatasetCsv() {
+    if (!result) return;
+    const csv = buildSortedDatasetCsv(result, criteria, analysisMode);
+    downloadBlob("sorted-scored-dataset.csv", csv, "text/csv;charset=utf-8");
   }
 
   return (
@@ -2070,10 +2284,10 @@ export function App() {
                   </strong>
                 </label>
                 <button className="wide-button" onClick={handlePreview} disabled={!file || loading}>
-                  {loading ? "Анализируем файл..." : "Построить предпросмотр"}
+                  {loading ? "Загружаем предпросмотр..." : "Построить предпросмотр"}
                 </button>
                 <p className="muted-note">
-                  Сначала система отдает быстрый профиль, а расширенные графики и статистики догружает отдельно, чтобы не блокировать интерфейс.
+                  На первом этапе загружаются только первые строки и информация о колонках. Графики и расширенная аналитика считаются позже, на этапе подготовки.
                 </p>
               </div>
             </div>
@@ -2086,7 +2300,7 @@ export function App() {
                   </div>
                   <div className="panel-head-actions">
                     {preview ? <span className="pill">{preview.rows_total} строк</span> : null}
-                    {preview ? <span className="pill">{profileDetailLevel === "detailed" ? "Полный профиль" : "Быстрый профиль"}</span> : null}
+                    {preview ? <span className="pill">Только предпросмотр</span> : null}
                   </div>
                 </div>
               {preview ? (
@@ -2240,21 +2454,64 @@ export function App() {
                         <tbody>
                           {fields.map((field, index) => {
                             const column = preview?.columns.find((item) => item.normalized_name === field.key);
+                            const fieldProfile = profile.find((item) => item.key === field.key);
+                            const detectedDateFormat = fieldProfile?.recommended_config.datetime_format ?? "YYYY-MM-DD";
                             return (
                               <tr key={field.key}>
                                 <td>{field.key}</td>
                                 <td>{column?.sample_values.slice(0, 3).map(String).join(", ") || "-"}</td>
                                 <td>
-                                  <select
-                                    value={field.field_type}
-                                    onChange={(event) => updateField(index, { field_type: event.target.value as FieldConfig["field_type"] })}
-                                  >
-                                    <option value="numeric">{fieldTypeLabel("numeric")}</option>
-                                    <option value="categorical">{fieldTypeLabel("categorical")}</option>
-                                    <option value="binary">{fieldTypeLabel("binary")}</option>
-                                    <option value="text">{fieldTypeLabel("text")}</option>
-                                    <option value="datetime">{fieldTypeLabel("datetime")}</option>
-                                  </select>
+                                  <div className="stacked-control">
+                                    <select
+                                      value={field.field_type}
+                                      onChange={(event) => {
+                                        const nextType = event.target.value as FieldConfig["field_type"];
+                                        updateField(index, {
+                                          field_type: nextType,
+                                          rounding_precision: nextType === "float" ? (field.rounding_precision ?? 2) : null,
+                                          datetime_format: nextType === "datetime" ? (field.datetime_format ?? detectedDateFormat) : null,
+                                        });
+                                      }}
+                                    >
+                                      <option value="integer">{fieldTypeLabel("integer")}</option>
+                                      <option value="float">{fieldTypeLabel("float")}</option>
+                                      <option value="categorical">{fieldTypeLabel("categorical")}</option>
+                                      <option value="binary">{fieldTypeLabel("binary")}</option>
+                                      <option value="text">{fieldTypeLabel("text")}</option>
+                                      <option value="datetime">{fieldTypeLabel("datetime")}</option>
+                                    </select>
+                                    {field.field_type === "float" ? (
+                                      <label className="sub-control">
+                                        <span>Знаков После Запятой</span>
+                                        <input
+                                          type="number"
+                                          min={0}
+                                          max={10}
+                                          step={1}
+                                          value={field.rounding_precision ?? 2}
+                                          onChange={(event) =>
+                                            updateField(index, {
+                                              rounding_precision: Math.max(0, Math.min(10, Number(event.target.value || 0))),
+                                            })
+                                          }
+                                        />
+                                      </label>
+                                    ) : null}
+                                    {field.field_type === "datetime" ? (
+                                      <label className="sub-control">
+                                        <span>Формат Даты</span>
+                                        <select
+                                          value={field.datetime_format ?? detectedDateFormat}
+                                          onChange={(event) => updateField(index, { datetime_format: event.target.value })}
+                                        >
+                                          {DATETIME_FORMAT_OPTIONS.map((format) => (
+                                            <option key={format} value={format}>{format}</option>
+                                          ))}
+                                        </select>
+                                        <small>Автоопределено: {detectedDateFormat}</small>
+                                      </label>
+                                    ) : null}
+                                  </div>
                                 </td>
                                 <td>
                                   <label className="round-checkbox">
@@ -2293,7 +2550,8 @@ export function App() {
                           const index = fields.findIndex((item) => item.key === field.key);
                           const disabled = !field.include_in_output;
                           const column = preview?.columns.find((item) => item.normalized_name === field.key);
-                          const samples = column ? uniqueSamples(column).slice(0, 6) : [];
+                          const categories = categoriesForField(preview, field.key, column);
+                          const samples = categories.slice(0, 6);
                           return (
                             <article className="field-card" key={`encoding-${field.key}`}>
                               <div className="field-card-head">
@@ -2325,6 +2583,37 @@ export function App() {
                                     <option value="ordinal">{methodLabel("ordinal")}</option>
                                   </select>
                                 </label>
+                                {field.encoding === "ordinal" ? (
+                                  <label className="wide-control">
+                                    <LabelWithTip
+                                      label="Ручная шкала категорий"
+                                      tip="Задайте числовые значения вручную для каждой категории. Эти значения будут использованы при ordinal encoding."
+                                    />
+                                    <div className="manual-map-grid">
+                                      {categories.map((category) => (
+                                        <div key={`${field.key}-${category}`} className="manual-map-row">
+                                          <span>{category}</span>
+                                          <input
+                                            type="number"
+                                            step="0.01"
+                                            value={String(field.ordinal_map?.[category] ?? "")}
+                                            onChange={(event) => {
+                                              const raw = event.target.value;
+                                              const currentMap = field.ordinal_map ?? {};
+                                              const nextMap = { ...currentMap };
+                                              if (raw === "") {
+                                                delete nextMap[category];
+                                              } else {
+                                                nextMap[category] = Number(raw);
+                                              }
+                                              updateField(index, { ordinal_map: nextMap });
+                                            }}
+                                          />
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </label>
+                                ) : null}
                               </div>
                             </article>
                           );
@@ -2346,7 +2635,7 @@ export function App() {
                     </div>
                     <div className="field-board">
                       {fields
-                        .filter((field) => field.field_type === "numeric")
+                        .filter((field) => isNumericFieldType(field.field_type))
                         .map((field) => {
                           const index = fields.findIndex((item) => item.key === field.key);
                           const disabled = !field.include_in_output;
@@ -2369,7 +2658,6 @@ export function App() {
                                     disabled={disabled}
                                     onChange={(event) => updateFieldNormalization(index, event.target.value as FieldConfig["normalization"])}
                                   >
-                                    <option value="none">{methodLabel("none")}</option>
                                     <option value="minmax">{methodLabel("minmax")}</option>
                                     <option value="zscore">{methodLabel("zscore")}</option>
                                     <option value="robust">{methodLabel("robust")}</option>
@@ -2380,7 +2668,7 @@ export function App() {
                             </article>
                           );
                         })}
-                      {!fields.some((field) => field.field_type === "numeric") ? (
+                      {!fields.some((field) => isNumericFieldType(field.field_type)) ? (
                         <p className="muted-note">Числовые колонки не найдены. Назначьте тип в разделе «Типы данных».</p>
                       ) : null}
                     </div>
@@ -2459,7 +2747,7 @@ export function App() {
                                         needsDefaultConstant
                                           ? {
                                             missing_strategy: nextStrategy,
-                                            missing_constant: field.field_type === "numeric" ? 0 : "unknown",
+                                            missing_constant: isNumericFieldType(field.field_type) ? 0 : "unknown",
                                           }
                                           : { missing_strategy: nextStrategy },
                                       );
@@ -2467,8 +2755,8 @@ export function App() {
                                   >
                                     <option value="none">{methodLabel("none")}</option>
                                     <option value="drop_row">{methodLabel("drop_row")}</option>
-                                    {field.field_type === "numeric" ? <option value="median">{methodLabel("median")}</option> : null}
-                                    {field.field_type === "numeric" ? <option value="mean">{methodLabel("mean")}</option> : null}
+                                    {isNumericFieldType(field.field_type) ? <option value="median">{methodLabel("median")}</option> : null}
+                                    {isNumericFieldType(field.field_type) ? <option value="mean">{methodLabel("mean")}</option> : null}
                                     <option value="mode">{methodLabel("mode")}</option>
                                     <option value="constant">{methodLabel("constant")}</option>
                                   </select>
@@ -2477,13 +2765,13 @@ export function App() {
                                   <label>
                                     Подставляемое значение
                                     <input
-                                      type={field.field_type === "numeric" ? "number" : "text"}
-                                      step={field.field_type === "numeric" ? "any" : undefined}
+                                      type={isNumericFieldType(field.field_type) ? "number" : "text"}
+                                      step={isNumericFieldType(field.field_type) ? "any" : undefined}
                                       value={String(field.missing_constant ?? "")}
                                       onChange={(event) => {
                                         const rawValue = event.target.value;
                                         updateField(index, {
-                                          missing_constant: field.field_type === "numeric"
+                                          missing_constant: isNumericFieldType(field.field_type)
                                             ? (rawValue === "" ? null : Number(rawValue))
                                             : rawValue,
                                         });
@@ -2510,7 +2798,7 @@ export function App() {
                     </div>
                     <div className="field-board">
                       {fields
-                        .filter((field) => field.field_type === "numeric")
+                        .filter((field) => isNumericFieldType(field.field_type))
                         .map((field) => {
                           const index = fields.findIndex((item) => item.key === field.key);
                           const fieldProfile = profile.find((item) => item.key === field.key);
@@ -2598,7 +2886,7 @@ export function App() {
                             </article>
                           );
                         })}
-                      {!fields.some((field) => field.field_type === "numeric") ? (
+                      {!fields.some((field) => isNumericFieldType(field.field_type)) ? (
                         <p className="muted-note">В текущей конфигурации нет числовых колонок для построения гистограмм.</p>
                       ) : null}
                     </div>
@@ -2644,7 +2932,7 @@ export function App() {
                   label="Режим анализа"
                   tip="Определяет постановку задачи: глобальное ранжирование всей выборки либо оценка близости объектов к выбранному эталону."
                 />
-                <select value={analysisMode} onChange={(event) => setAnalysisMode(event.target.value as AnalysisMode)}>
+                <select value={analysisMode} onChange={(event) => updateAnalysisMode(event.target.value as AnalysisMode)}>
                   <option value="analog_search">Поиск аналогов для целевого объекта</option>
                   <option value="rating">Общий рейтинг объектов</option>
                 </select>
@@ -2736,7 +3024,8 @@ export function App() {
                   </p>
                 </div>
                 <div className="report-actions">
-                  <button className="ghost-button" onClick={() => setReportPreviewOpen(true)} disabled={!result}>Предпросмотр</button>
+                  <button className="ghost-button" onClick={openReportPreview} disabled={!result}>Предпросмотр</button>
+                  <button className="ghost-button" onClick={exportSortedDatasetCsv} disabled={!result}>Скачать отсортированный датасет</button>
                   <button className="ghost-button" onClick={exportJsonReport} disabled={!result}>JSON</button>
                   <button className="ghost-button" onClick={exportHtmlReport} disabled={!result}>HTML</button>
                   <button className="ghost-button" onClick={exportPdfReport} disabled={!result || loading}>PDF</button>
@@ -3021,6 +3310,40 @@ export function App() {
                     ))}
                   </div>
                 ) : null}
+                {systemDashboard?.telemetry ? (
+                  <>
+                    <div className="metric-row">
+                      <div className="metric"><span>Запросов (окно)</span><strong>{systemDashboard.telemetry.overall.requests}</strong></div>
+                      <div className="metric"><span>Ошибок (окно)</span><strong>{systemDashboard.telemetry.overall.errors}</strong></div>
+                      <div className="metric"><span>Средний отклик, мс</span><strong>{systemDashboard.telemetry.overall.avg_ms.toFixed(2)}</strong></div>
+                      <div className="metric"><span>Ошибка, %</span><strong>{systemDashboard.telemetry.overall.error_rate_pct.toFixed(2)}</strong></div>
+                    </div>
+                    <div className="panel subtle-panel">
+                      <div className="panel-head compact-head">
+                        <div>
+                          <span className="section-kicker">Производительность</span>
+                          <h3>Средний отклик по модулям</h3>
+                          <p>Легкая сводка по latency и ошибкам, без перегруза дашборда.</p>
+                        </div>
+                      </div>
+                      <div className="bar-list">
+                        {(() => {
+                          const modules = systemDashboard.telemetry?.modules ?? [];
+                          const maxAvg = Math.max(...modules.map((item) => item.avg_ms), 1);
+                          return modules.slice(0, 6).map((item) => (
+                            <div className="bar-item" key={item.module}>
+                              <span title={SERVICE_LABELS[item.module] ?? item.module}>{SERVICE_LABELS[item.module] ?? item.module}</span>
+                              <div className="bar-track" title={`avg ${item.avg_ms.toFixed(2)} ms, p95 ${item.p95_ms.toFixed(2)} ms`}>
+                                <div className="bar-fill" style={{ width: `${Math.max(4, (item.avg_ms / maxAvg) * 100)}%` }} />
+                              </div>
+                              <strong>{item.avg_ms.toFixed(1)} ms</strong>
+                            </div>
+                          ));
+                        })()}
+                      </div>
+                    </div>
+                  </>
+                ) : null}
                 <div className="table-wrap">
                   <table>
                     <thead>
@@ -3058,11 +3381,12 @@ export function App() {
                 <button className="modal-close" onClick={() => setReportPreviewOpen(false)} aria-label="Закрыть">×</button>
               </div>
               <div className="report-preview-toolbar">
+                <button className="ghost-button" onClick={exportSortedDatasetCsv}>Скачать отсортированный датасет</button>
                 <button className="ghost-button" onClick={exportJsonReport}>Скачать JSON</button>
                 <button className="ghost-button" onClick={exportHtmlReport}>Скачать HTML</button>
                 <button onClick={exportDocxReport} disabled={loading}>Скачать DOCX</button>
               </div>
-              <iframe className="report-preview-frame" title="Предпросмотр отчета" srcDoc={reportHtml} />
+              <iframe className="report-preview-frame" title="Предпросмотр отчета" srcDoc={reportPreviewHtml} />
             </section>
           </div>
         ) : null}

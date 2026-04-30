@@ -90,7 +90,12 @@ def test_pipeline_endpoints_and_dashboard(client, sample_csv_bytes: bytes):
         headers={"Authorization": f"Bearer {token}"},
     )
     assert dashboard_response.status_code == 200
-    assert dashboard_response.json()["services"]["backend"]["status"] == "ok"
+    dashboard_payload = dashboard_response.json()
+    assert dashboard_payload["services"]["backend"]["status"] == "ok"
+    assert "telemetry" in dashboard_payload
+    assert dashboard_payload["telemetry"]["overall"]["requests"] >= 1
+    assert isinstance(dashboard_payload["telemetry"]["modules"], list)
+    assert any(item["module"] == "pipeline" for item in dashboard_payload["telemetry"]["modules"])
 
     report_response = client.post(
         "/api/v1/reports/comparison.docx",

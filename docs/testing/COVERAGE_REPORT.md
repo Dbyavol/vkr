@@ -1,6 +1,6 @@
 # Coverage Report
 
-Дата прогона: 2026-04-29
+Дата прогона: 2026-04-30
 
 Команда:
 
@@ -10,8 +10,8 @@
 
 Итог:
 
-- Всего тестов: `17`
-- Статус: `17 passed`
+- Всего тестов: `22`
+- Статус: `22 passed`
 - Общее покрытие backend: `80%`
 - XML-отчет: [coverage.xml](/C:/Users/Stepan/Documents/New%20project/coverage.xml)
 - HTML-отчет: [htmlcov/index.html](/C:/Users/Stepan/Documents/New%20project/htmlcov/index.html)
@@ -20,6 +20,8 @@
 
 - `backend/app/schemas/*`
 - `backend/app/services/user_service.py`
+- `backend/app/services/profile_artifact_service.py`
+- `backend/app/core/telemetry.py`
 - `backend/app/db/*`
 - `backend/app/models/*`
 
@@ -35,3 +37,9 @@
 Интерпретация результата:
 
 Текущее покрытие подтверждает работоспособность основных пользовательских сценариев и критической бизнес-логики нового модульного монолита. При этом наибольший потенциал роста находится в дополнительных ветках обработки ошибок, редких сценариях API и расширенных аналитических ветвлениях.
+
+Дополнительно внедрено:
+
+- Тесты по runtime-телеметрии для админ-дашборда (`backend/tests/test_telemetry.py`).
+- Проверка наличия telemetry-блока в `system/dashboard` (`backend/tests/test_api_endpoints.py`).
+- Тесты кэширования детального профиля (`backend/tests/test_profile_artifact_service.py`).

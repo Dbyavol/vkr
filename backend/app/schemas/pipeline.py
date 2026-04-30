@@ -27,7 +27,7 @@ class ImportedPreview(BaseModel):
     normalized_dataset: dict[str, list[PipelineRow]]
 
 
-FieldType = Literal["numeric", "categorical", "binary", "text", "datetime"]
+FieldType = Literal["numeric", "integer", "float", "categorical", "binary", "text", "datetime"]
 MissingStrategy = Literal["none", "drop_row", "mean", "median", "mode", "constant"]
 OutlierMethod = Literal["none", "iqr_remove", "iqr_clip", "zscore_remove", "zscore_clip"]
 NormalizationMethod = Literal["none", "minmax", "zscore", "robust", "log_minmax"]
@@ -47,6 +47,8 @@ class FieldConfig(BaseModel):
     outlier_threshold: float = 1.5
     normalization: NormalizationMethod = "none"
     encoding: EncodingMethod = "none"
+    rounding_precision: int | None = None
+    datetime_format: str | None = None
     ordinal_map: dict[str, float] | None = None
     binary_map: dict[str, float] | None = None
 

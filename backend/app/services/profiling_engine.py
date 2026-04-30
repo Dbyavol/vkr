@@ -19,6 +19,15 @@ from app.schemas.preprocessing import (
 )
 
 DETAILED_VISUAL_SAMPLE_LIMIT = 5000
+DATETIME_FORMAT_CANDIDATES: list[tuple[str, str]] = [
+    ("YYYY-MM-DD", "%Y-%m-%d"),
+    ("YYYY/MM/DD", "%Y/%m/%d"),
+    ("DD.MM.YYYY", "%d.%m.%Y"),
+    ("DD-MM-YYYY", "%d-%m-%Y"),
+    ("YYYY-MM-DD HH:mm:ss", "%Y-%m-%d %H:%M:%S"),
+    ("YYYY/MM/DD HH:mm:ss", "%Y/%m/%d %H:%M:%S"),
+    ("DD.MM.YYYY HH:mm:ss", "%d.%m.%Y %H:%M:%S"),
+]
 
 
 def _is_missing(value: Any) -> bool:
@@ -68,6 +77,26 @@ def _to_datetime(value: Any) -> datetime | None:
     return None
 
 
+def _detect_datetime_format(values: list[Any]) -> str | None:
+    samples = [str(value).strip() for value in values if not _is_missing(value)]
+    if not samples:
+        return None
+    best_label: str | None = None
+    best_score = 0
+    for label, fmt in DATETIME_FORMAT_CANDIDATES:
+        score = 0
+        for sample in samples[:50]:
+            try:
+                datetime.strptime(sample.replace("Z", "+00:00"), fmt)
+                score += 1
+            except ValueError:
+                continue
+        if score > best_score:
+            best_score = score
+            best_label = label
+    return best_label if best_score > 0 else None
+
+
 def _percentile(sorted_values: list[float], fraction: float) -> float:
     if not sorted_values:
         return 0.0
@@ -91,7 +120,10 @@ def _infer_type(values: list[Any], unique_ratio: float) -> str:
         return "datetime"
     numeric_count = sum(1 for value in non_missing if _to_float(value) is not None)
     if numeric_count / len(non_missing) >= 0.9:
-        return "numeric"
+        numeric_values = [numeric for value in non_missing if (numeric := _to_float(value)) is not None]
+        if numeric_values and all(float(value).is_integer() for value in numeric_values):
+            return "integer"
+        return "float"
     if len(lowered) <= 30 and unique_ratio < 0.95:
         return "categorical"
     return "text"
@@ -218,7 +250,7 @@ def _profile_field(
     histogram: list[ChartPoint] = []
     top_categories = _category_chart(visual_values if visual_values is not None else values) if include_visuals else []
 
-    if inferred_type == "numeric" and numeric_values:
+    if inferred_type in {"numeric", "integer", "float"} and numeric_values:
         ordered = sorted(numeric_values)
         q1 = _percentile(ordered, 0.25)
         q3 = _percentile(ordered, 0.75)
@@ -263,6 +295,16 @@ def _profile_field(
                     suggested_patch={"outlier_method": "iqr_clip"},
                 )
             )
+        if inferred_type == "float":
+            config.rounding_precision = 2
+            recommendations.append(
+                FieldRecommendation(
+                    code="ROUND_FLOAT_VALUES",
+                    severity="info",
+                    message="Для дробного признака можно задать округление на этапе подготовки данных.",
+                    suggested_patch={"rounding_precision": 2},
+                )
+            )
 
     if inferred_type == "categorical":
         config.ordinal_map = _ordinal_map(values)
@@ -296,13 +338,15 @@ def _profile_field(
         )
 
     if inferred_type == "datetime":
+        detected_datetime_format = _detect_datetime_format(non_missing)
         config.include_in_output = False
+        config.datetime_format = detected_datetime_format
         recommendations.append(
             FieldRecommendation(
                 code="DERIVE_DATETIME_FEATURES",
                 severity="info",
                 message="Datetime-признак лучше разложить на производные поля (год, месяц, день, день недели).",
-                suggested_patch={"field_type": "datetime", "include_in_output": False},
+                suggested_patch={"field_type": "datetime", "include_in_output": False, "datetime_format": detected_datetime_format},
             )
         )
         if missing_count:
@@ -399,7 +443,7 @@ def profile_dataset(payload: DatasetProfileRequest) -> DatasetProfileResponse:
         for key in keys
     ]
     weights, notes = _recommended_weights(fields)
-    numeric_keys = [field.key for field in fields if field.inferred_type == "numeric"]
+    numeric_keys = [field.key for field in fields if field.inferred_type in {"numeric", "integer", "float"}]
     return DatasetProfileResponse(
         rows_total=len(rows),
         detail_level=detail_level,
@@ -416,7 +460,7 @@ def _quality_report(fields: list[FieldProfile], rows_total: int) -> DatasetQuali
     issues: list[DatasetQualityIssue] = []
     fields_count = max(len(fields), 1)
     analytic_fields = [field for field in fields if field.analytic_candidate]
-    numeric_fields = [field for field in fields if field.inferred_type == "numeric"]
+    numeric_fields = [field for field in fields if field.inferred_type in {"numeric", "integer", "float"}]
     categorical_fields = [field for field in fields if field.inferred_type == "categorical"]
     text_fields = [field for field in fields if field.inferred_type == "text"]
     total_missing = sum(field.missing_count for field in fields)
@@ -558,7 +602,7 @@ def _recommended_weights(fields: list[FieldProfile]) -> tuple[dict[str, float], 
         if not field.analytic_candidate:
             continue
         score = 1.0
-        if field.inferred_type == "numeric":
+        if field.inferred_type in {"numeric", "integer", "float"}:
             score += 0.35
             if field.numeric_min is not None and field.numeric_max is not None and field.numeric_min != field.numeric_max:
                 score += 0.25

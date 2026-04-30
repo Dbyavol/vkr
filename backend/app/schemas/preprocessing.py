@@ -3,7 +3,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 
-FieldType = Literal["numeric", "categorical", "binary", "text", "datetime"]
+FieldType = Literal["numeric", "integer", "float", "categorical", "binary", "text", "datetime"]
 MissingStrategy = Literal["none", "drop_row", "mean", "median", "mode", "constant"]
 OutlierMethod = Literal["none", "iqr_remove", "iqr_clip", "zscore_remove", "zscore_clip"]
 NormalizationMethod = Literal["none", "minmax", "zscore", "robust", "log_minmax"]
@@ -31,6 +31,8 @@ class FieldConfig(BaseModel):
     outlier_threshold: float = 1.5
     normalization: NormalizationMethod = "none"
     encoding: EncodingMethod = "none"
+    rounding_precision: int | None = None
+    datetime_format: str | None = None
     ordinal_map: dict[str, float] | None = None
     binary_map: dict[str, float] | None = None
 
@@ -42,6 +44,8 @@ class FieldConfig(BaseModel):
             raise ValueError("ordinal_map is required when encoding=ordinal")
         if self.encoding == "binary_map" and not self.binary_map:
             raise ValueError("binary_map is required when encoding=binary_map")
+        if self.rounding_precision is not None and self.rounding_precision < 0:
+            raise ValueError("rounding_precision must be >= 0")
         return self
 
 

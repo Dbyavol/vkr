@@ -43,7 +43,6 @@ from app.services.pipeline_engine import (
     run_pipeline_via_services,
     upload_and_profile_dataset,
 )
-from app.services.dataset_artifact_service import build_and_cache_raw_detailed_profile_artifact
 from app.services.user_service import bootstrap_admin
 
 settings = get_settings()
@@ -247,7 +246,6 @@ async def system_dashboard(authorization: str | None = Header(default=None)) -> 
 
 @app.post(f"{settings.api_prefix}/pipeline/upload-profile", response_model=PipelineProfileStoredResponse)
 async def pipeline_upload_profile(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     detail_level: str = Form(default="summary"),
 ) -> PipelineProfileStoredResponse:
@@ -265,13 +263,6 @@ async def pipeline_upload_profile(
             dataset_file_id=data.get("dataset_file_id"),
             detail_level=detail_level,
         )
-        if detail_level != "detailed" and data.get("dataset_file_id"):
-            background_tasks.add_task(
-                build_and_cache_raw_detailed_profile_artifact,
-                dataset_file_id=int(data["dataset_file_id"]),
-                filename=file.filename or "dataset",
-                source_body=body,
-            )
         return PipelineProfileStoredResponse.model_validate(data)
     except ValueError as exc:
         request_logger.error(

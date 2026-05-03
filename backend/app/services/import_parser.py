@@ -71,11 +71,11 @@ def _records_from_bytes(filename: str, body: bytes) -> list[dict[str, Any]]:
         try:
             text = body.decode("utf-8-sig")
         except UnicodeDecodeError:
-            # Many Russian public datasets are exported in cp1251.
             text = body.decode("cp1251")
 
         sample = text[:4096]
         delimiters = [",", ";", "\t", "|"]
+        
         delimiter = ","
         try:
             dialect = csv.Sniffer().sniff(sample, delimiters=delimiters)

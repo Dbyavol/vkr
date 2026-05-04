@@ -115,7 +115,7 @@ def _normalize_numeric(series: pd.Series, method: str) -> pd.Series:
 
 
 def _is_numeric_field(field_type: str) -> bool:
-    return field_type in {"numeric", "integer", "float"}
+    return field_type in {"numeric", "integer", "float", "geo_latitude", "geo_longitude"}
 
 
 def preprocess_rows(

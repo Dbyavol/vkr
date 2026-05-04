@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from collections import Counter
 from datetime import datetime
-from math import sqrt
-from statistics import mean, median
 from typing import Any
+
+import numpy as np
+import pandas as pd
 
 from app.schemas.preprocessing import (
     ChartPoint,
@@ -28,6 +28,51 @@ DATETIME_FORMAT_CANDIDATES: list[tuple[str, str]] = [
     ("YYYY/MM/DD HH:mm:ss", "%Y/%m/%d %H:%M:%S"),
     ("DD.MM.YYYY HH:mm:ss", "%d.%m.%Y %H:%M:%S"),
 ]
+
+
+def _row_id(row: Any) -> str:
+    if isinstance(row, dict):
+        return str(row.get("id"))
+    return str(row.id)
+
+
+def _row_values(row: Any) -> dict[str, Any]:
+    if isinstance(row, dict):
+        values = row.get("values", {})
+        return values if isinstance(values, dict) else {}
+    return row.values
+
+
+def _build_frame(rows: list[Any]) -> pd.DataFrame:
+    records = [_row_values(row) for row in rows]
+    frame = pd.DataFrame(records, dtype=object)
+    frame.insert(0, "__id", [_row_id(row) for row in rows])
+    frame = frame.set_index("__id", drop=True)
+    frame = frame.replace("", pd.NA)
+    return frame
+
+
+def _non_missing_series(series: pd.Series) -> pd.Series:
+    return series.dropna()
+
+
+def _string_series(series: pd.Series) -> pd.Series:
+    return series.astype("string").str.strip()
+
+
+def _numeric_series(series: pd.Series) -> pd.Series:
+    if pd.api.types.is_bool_dtype(series):
+        return series.astype(float)
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce")
+    normalized = (
+        series.astype("string")
+        .str.strip()
+        .str.replace(" ", "", regex=False)
+        .str.replace(",", ".", regex=False)
+        .replace({"": pd.NA})
+    )
+    return pd.to_numeric(normalized, errors="coerce")
 
 
 def _is_missing(value: Any) -> bool:
@@ -97,31 +142,21 @@ def _detect_datetime_format(values: list[Any]) -> str | None:
     return best_label if best_score > 0 else None
 
 
-def _percentile(sorted_values: list[float], fraction: float) -> float:
-    if not sorted_values:
-        return 0.0
-    index = (len(sorted_values) - 1) * fraction
-    lower = int(index)
-    upper = min(lower + 1, len(sorted_values) - 1)
-    if lower == upper:
-        return sorted_values[lower]
-    return sorted_values[lower] + (sorted_values[upper] - sorted_values[lower]) * (index - lower)
-
-
-def _infer_type(values: list[Any], unique_ratio: float) -> str:
-    non_missing = [value for value in values if not _is_missing(value)]
-    if not non_missing:
+def _infer_type(series: pd.Series, unique_ratio: float) -> str:
+    non_missing = _non_missing_series(series)
+    if non_missing.empty:
         return "text"
-    lowered = {str(value).strip().lower() for value in non_missing}
+    lowered = {str(value).strip().lower() for value in non_missing.tolist()}
     if lowered <= {"true", "false", "0", "1", "yes", "no", "да", "нет"} and len(lowered) <= 2:
         return "binary"
-    datetime_count = sum(1 for value in non_missing if _to_datetime(value) is not None)
-    if datetime_count / len(non_missing) >= 0.8:
+    datetime_samples = non_missing.tolist()[: min(50, len(non_missing))]
+    datetime_matches = sum(1 for value in datetime_samples if _to_datetime(value) is not None)
+    if datetime_samples and float(datetime_matches / len(datetime_samples)) >= 0.8:
         return "datetime"
-    numeric_count = sum(1 for value in non_missing if _to_float(value) is not None)
-    if numeric_count / len(non_missing) >= 0.9:
-        numeric_values = [numeric for value in non_missing if (numeric := _to_float(value)) is not None]
-        if numeric_values and all(float(value).is_integer() for value in numeric_values):
+    numeric = _numeric_series(non_missing)
+    numeric_valid = numeric.dropna()
+    if len(non_missing) and float(numeric_valid.shape[0] / len(non_missing)) >= 0.9:
+        if not numeric_valid.empty and bool((numeric_valid % 1 == 0).all()):
             return "integer"
         return "float"
     if len(lowered) <= 30 and unique_ratio < 0.95:
@@ -129,91 +164,75 @@ def _infer_type(values: list[Any], unique_ratio: float) -> str:
     return "text"
 
 
-def _histogram(values: list[float], bins: int) -> list[ChartPoint]:
-    if not values:
+def _histogram(series: pd.Series, bins: int) -> list[ChartPoint]:
+    numeric = _numeric_series(series).dropna()
+    if numeric.empty:
         return []
-    min_value = min(values)
-    max_value = max(values)
+    values = numeric.to_numpy(dtype=float)
+    min_value = float(values.min())
+    max_value = float(values.max())
     if min_value == max_value:
-        return [ChartPoint(label=str(round(min_value, 3)), value=len(values))]
-    bins = max(2, bins)
-    width = (max_value - min_value) / bins
-    counts = [0 for _ in range(bins)]
-    for value in values:
-        index = min(int((value - min_value) / width), bins - 1)
-        counts[index] += 1
+        return [ChartPoint(label=str(round(min_value, 3)), value=int(values.size))]
+    counts, edges = np.histogram(values, bins=max(2, bins), range=(min_value, max_value))
     return [
-        ChartPoint(label=f"{round(min_value + width * index, 2)}-{round(min_value + width * (index + 1), 2)}", value=count)
-        for index, count in enumerate(counts)
+        ChartPoint(
+            label=f"{round(float(edges[index]), 2)}-{round(float(edges[index + 1]), 2)}",
+            value=int(count),
+        )
+        for index, count in enumerate(counts.tolist())
     ]
 
 
-def _category_chart(values: list[Any], limit: int = 12) -> list[ChartPoint]:
-    counter = Counter(str(value) for value in values if not _is_missing(value))
-    return [ChartPoint(label=label, value=count) for label, count in counter.most_common(limit)]
+def _category_chart(series: pd.Series, limit: int = 12) -> list[ChartPoint]:
+    counts = _string_series(_non_missing_series(series)).value_counts().head(limit)
+    return [ChartPoint(label=str(label), value=int(value)) for label, value in counts.items()]
 
 
-def _ordinal_map(values: list[Any]) -> dict[str, float]:
-    unique = sorted({str(value) for value in values if not _is_missing(value)})
+def _ordinal_map(series: pd.Series) -> dict[str, float]:
+    unique = sorted({str(value) for value in _non_missing_series(series).tolist()})
     if not unique:
         return {}
     return {value: round((index + 1) / len(unique), 4) for index, value in enumerate(unique)}
 
 
-def _pearson(x_values: list[float], y_values: list[float]) -> float | None:
-    if len(x_values) < 3 or len(y_values) < 3 or len(x_values) != len(y_values):
-        return None
-    x_mean = mean(x_values)
-    y_mean = mean(y_values)
-    numerator = sum((x - x_mean) * (y - y_mean) for x, y in zip(x_values, y_values, strict=False))
-    denominator_x = sqrt(sum((x - x_mean) ** 2 for x in x_values))
-    denominator_y = sqrt(sum((y - y_mean) ** 2 for y in y_values))
-    denominator = denominator_x * denominator_y
-    if denominator == 0:
-        return None
-    return round(numerator / denominator, 4)
-
-
-def _build_missing_matrix(rows: list[Any], keys: list[str], limit: int = 120) -> list[dict[str, Any]]:
+def _build_missing_matrix(frame: pd.DataFrame, keys: list[str], limit: int = 120) -> list[dict[str, Any]]:
+    if frame.empty or not keys:
+        return []
+    missing_mask = frame[keys].isna()
+    missing_counts = missing_mask.sum(axis=1)
+    rows_with_missing = missing_counts[missing_counts > 0].head(limit)
     result: list[dict[str, Any]] = []
-    for row in rows:
-        missing_fields = [key for key in keys if _is_missing(row.values.get(key))]
-        if not missing_fields:
-            continue
+    for row_id in rows_with_missing.index.tolist():
+        row_mask = missing_mask.loc[row_id]
+        missing_fields = row_mask[row_mask].index.tolist()
         result.append(
             {
-                "id": row.id,
-                "missing_count": len(missing_fields),
+                "id": str(row_id),
+                "missing_count": int(rows_with_missing.loc[row_id]),
                 "missing_fields": missing_fields,
             }
         )
-        if len(result) >= limit:
-            break
     return result
 
 
-def _build_correlation_matrix(rows: list[Any], numeric_keys: list[str], limit: int = 60) -> list[dict[str, Any]]:
+def _build_correlation_matrix(frame: pd.DataFrame, numeric_keys: list[str], limit: int = 60) -> list[dict[str, Any]]:
+    if len(numeric_keys) < 2:
+        return []
+    numeric_frame = pd.DataFrame({key: _numeric_series(frame[key]) for key in numeric_keys}, index=frame.index)
+    corr = numeric_frame.corr(method="pearson", min_periods=3)
     pairs: list[dict[str, Any]] = []
     for index, left_key in enumerate(numeric_keys):
         for right_key in numeric_keys[index + 1 :]:
-            x_values: list[float] = []
-            y_values: list[float] = []
-            for row in rows:
-                left = _to_float(row.values.get(left_key))
-                right = _to_float(row.values.get(right_key))
-                if left is None or right is None:
-                    continue
-                x_values.append(left)
-                y_values.append(right)
-            correlation = _pearson(x_values, y_values)
-            if correlation is None:
+            pearson = corr.at[left_key, right_key]
+            if pd.isna(pearson):
                 continue
+            samples = int(numeric_frame[[left_key, right_key]].dropna().shape[0])
             pairs.append(
                 {
                     "left_key": left_key,
                     "right_key": right_key,
-                    "pearson": correlation,
-                    "samples": len(x_values),
+                    "pearson": round(float(pearson), 4),
+                    "samples": samples,
                 }
             )
     pairs.sort(key=lambda item: abs(float(item["pearson"])), reverse=True)
@@ -222,21 +241,23 @@ def _build_correlation_matrix(rows: list[Any], numeric_keys: list[str], limit: i
 
 def _profile_field(
     key: str,
-    values: list[Any],
-    visual_values: list[Any] | None,
+    series: pd.Series,
+    visual_series: pd.Series | None,
     rows_total: int,
     max_unique_values: int,
     histogram_bins: int,
     *,
     include_visuals: bool,
 ) -> FieldProfile:
-    missing_count = sum(1 for value in values if _is_missing(value))
-    non_missing = [value for value in values if not _is_missing(value)]
-    unique_values = sorted({str(value) for value in non_missing})
-    unique_count = len(unique_values)
+    values = series.tolist()
+    non_missing_series = _non_missing_series(series)
+    non_missing = non_missing_series.tolist()
+    unique_count = int(_string_series(non_missing_series).nunique()) if not non_missing_series.empty else 0
     unique_ratio = round(unique_count / max(len(non_missing), 1), 4)
-    inferred_type = _infer_type(values, unique_ratio)
-    numeric_values = [numeric for value in non_missing if (numeric := _to_float(value)) is not None]
+    inferred_type = _infer_type(series, unique_ratio)
+    numeric_series = _numeric_series(non_missing_series).dropna()
+    numeric_values = numeric_series.tolist()
+    missing_count = int(series.isna().sum())
 
     recommendations: list[FieldRecommendation] = []
     config = FieldConfig(
@@ -248,27 +269,22 @@ def _profile_field(
     outlier_count = 0
     numeric_min = numeric_max = numeric_mean = numeric_median = None
     histogram: list[ChartPoint] = []
-    top_categories = _category_chart(visual_values if visual_values is not None else values) if include_visuals else []
+    top_categories = _category_chart(visual_series if visual_series is not None else series) if include_visuals else []
 
     if inferred_type in {"numeric", "integer", "float"} and numeric_values:
-        ordered = sorted(numeric_values)
-        q1 = _percentile(ordered, 0.25)
-        q3 = _percentile(ordered, 0.75)
+        q1 = float(numeric_series.quantile(0.25))
+        q3 = float(numeric_series.quantile(0.75))
         iqr = q3 - q1
         low = q1 - 1.5 * iqr
         high = q3 + 1.5 * iqr
-        outlier_count = sum(1 for value in numeric_values if value < low or value > high)
-        numeric_min = min(numeric_values)
-        numeric_max = max(numeric_values)
-        numeric_mean = mean(numeric_values)
-        numeric_median = median(numeric_values)
+        outlier_count = int(((numeric_series < low) | (numeric_series > high)).sum())
+        numeric_min = float(numeric_series.min())
+        numeric_max = float(numeric_series.max())
+        numeric_mean = float(numeric_series.mean())
+        numeric_median = float(numeric_series.median())
         if include_visuals:
-            visual_numeric_values = [
-                numeric
-                for value in (visual_values if visual_values is not None else values)
-                if not _is_missing(value) and (numeric := _to_float(value)) is not None
-            ]
-            histogram = _histogram(visual_numeric_values or numeric_values, histogram_bins)
+            visual_numeric_series = _numeric_series(visual_series if visual_series is not None else series).dropna()
+            histogram = _histogram(visual_numeric_series if not visual_numeric_series.empty else numeric_series, histogram_bins)
         recommendations.append(
             FieldRecommendation(
                 code="NORMALIZE_NUMERIC",
@@ -307,7 +323,8 @@ def _profile_field(
             )
 
     if inferred_type == "categorical":
-        config.ordinal_map = _ordinal_map(values)
+        config.encoding = "ordinal"
+        config.ordinal_map = _ordinal_map(series)
         recommendations.append(
             FieldRecommendation(
                 code="ENCODE_CATEGORICAL",
@@ -345,7 +362,7 @@ def _profile_field(
             FieldRecommendation(
                 code="DERIVE_DATETIME_FEATURES",
                 severity="info",
-                message="Datetime-признак лучше разложить на производные поля (год, месяц, день, день недели).",
+                message="Datetime-признак лучше разложить на производные поля: год, месяц, день и день недели.",
                 suggested_patch={"field_type": "datetime", "include_in_output": False, "datetime_format": detected_datetime_format},
             )
         )
@@ -363,7 +380,8 @@ def _profile_field(
     if text_to_categorical_possible:
         config.field_type = "categorical"
         config.include_in_output = False
-        config.ordinal_map = _ordinal_map(values)
+        config.encoding = "ordinal"
+        config.ordinal_map = _ordinal_map(series)
         recommendations.append(
             FieldRecommendation(
                 code="TEXT_CAN_BE_CATEGORY",
@@ -377,7 +395,7 @@ def _profile_field(
             FieldRecommendation(
                 code="EXCLUDE_TEXT",
                 severity="info",
-                message="Свободный текст лучше исключить из расчета взвешенных коэффициентов или обработать отдельным NLP-модулем.",
+                message="Свободный текст лучше исключить из расчета взвешенных коэффициентов или обрабатывать отдельным NLP-модулем.",
                 suggested_patch={"include_in_output": False},
             )
         )
@@ -420,24 +438,31 @@ def _sample_values(values: list[Any], source_rows_total: int, limit: int = DETAI
     return sampled[:limit]
 
 
-def profile_dataset(payload: DatasetProfileRequest) -> DatasetProfileResponse:
-    rows = payload.dataset.rows
-    detail_level: ProfileDetailLevel = payload.detail_level
+def profile_rows(
+    rows: list[Any],
+    *,
+    max_unique_values: int = 30,
+    histogram_bins: int = 8,
+    histogram_bins_by_field: dict[str, int] | None = None,
+    detail_level: ProfileDetailLevel = "detailed",
+) -> DatasetProfileResponse:
     include_visuals = detail_level == "detailed"
+    frame = _build_frame(rows)
     rows_for_visuals = _sample_rows_for_detailed_visuals(rows) if include_visuals else rows
-    keys = sorted({key for row in rows for key in row.values.keys()})
+    visual_frame = _build_frame(rows_for_visuals) if include_visuals else frame
+    keys = sorted(frame.columns.tolist())
     bins_by_field = {
         key: max(2, min(64, int(value)))
-        for key, value in (payload.histogram_bins_by_field or {}).items()
+        for key, value in (histogram_bins_by_field or {}).items()
     }
     fields = [
         _profile_field(
             key,
-            [row.values.get(key) for row in rows],
-            _sample_values([row.values.get(key) for row in rows_for_visuals], len(rows)) if include_visuals else None,
-            len(rows),
-            payload.max_unique_values,
-            bins_by_field.get(key, payload.histogram_bins),
+            frame[key] if key in frame.columns else pd.Series(dtype="object"),
+            pd.Series(_sample_values(visual_frame[key].tolist(), len(frame.index))) if include_visuals and key in visual_frame.columns else None,
+            len(frame.index),
+            max_unique_values,
+            bins_by_field.get(key, histogram_bins),
             include_visuals=include_visuals,
         )
         for key in keys
@@ -445,14 +470,24 @@ def profile_dataset(payload: DatasetProfileRequest) -> DatasetProfileResponse:
     weights, notes = _recommended_weights(fields)
     numeric_keys = [field.key for field in fields if field.inferred_type in {"numeric", "integer", "float"}]
     return DatasetProfileResponse(
-        rows_total=len(rows),
+        rows_total=len(frame.index),
         detail_level=detail_level,
         fields=fields,
-        quality=_quality_report(fields, len(rows)),
+        quality=_quality_report(fields, len(frame.index)),
         recommended_weights=weights,
         weight_notes=notes,
-        missing_matrix_preview=_build_missing_matrix(rows_for_visuals, keys) if include_visuals else [],
-        correlation_matrix=_build_correlation_matrix(rows_for_visuals, numeric_keys) if include_visuals else [],
+        missing_matrix_preview=_build_missing_matrix(visual_frame, keys) if include_visuals else [],
+        correlation_matrix=_build_correlation_matrix(visual_frame, numeric_keys) if include_visuals else [],
+    )
+
+
+def profile_dataset(payload: DatasetProfileRequest) -> DatasetProfileResponse:
+    return profile_rows(
+        payload.dataset.rows,
+        max_unique_values=payload.max_unique_values,
+        histogram_bins=payload.histogram_bins,
+        histogram_bins_by_field=payload.histogram_bins_by_field or {},
+        detail_level=payload.detail_level,
     )
 
 
@@ -576,7 +611,7 @@ def _quality_report(fields: list[FieldProfile], rows_total: int) -> DatasetQuali
         label = "Можно использовать, но нужно проверить рекомендации"
     elif score >= 40:
         level = "risky"
-        label = "Рискованно, рекомендуется сделать предобработку и проверку рекомендаций"
+        label = "Рискованно, рекомендуется сделать предобработку и проверить рекомендации"
     else:
         level = "poor"
         label = "Не готово к анализу, рекомендуется серьезная предобработка и проверка рекомендаций"

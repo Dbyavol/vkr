@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 
 from app.core.logging import elapsed_ms, get_logger, log_audit_event, start_timer
@@ -9,16 +10,11 @@ from app.db.session import SessionLocal
 from app.schemas.analysis import AnalysisDataset, AnalysisFilters, AnalysisRequest, CriterionConfig as AnalysisCriterionConfig, DatasetObject
 from app.schemas.files import ComparisonHistoryCreate
 from app.schemas.pipeline import PipelineRequest, PipelineRunResponse
-from app.schemas.preprocessing import (
-    DatasetPayload,
-    DatasetProfileRequest,
-    DatasetRow,
-    ProfileDetailLevel,
-)
+from app.schemas.preprocessing import ProfileDetailLevel
 from app.services.analysis_engine import run_comparative_analysis
 from app.services.file_service import StorageAdapter, create_comparison_history, create_file_record, get_file, storage_stats
 from app.services.import_parser import parse_dataset_bytes
-from app.services.profiling_engine import profile_dataset
+from app.services.profiling_engine import profile_rows
 from app.services.preprocessing_engine import preprocess_rows
 from app.services.security import decode_access_token
 from app.services.user_service import admin_stats, get_user
@@ -50,6 +46,75 @@ def _analysis_dataset(rows: list[dict[str, Any]]) -> dict[str, Any]:
             for row in rows
         ]
     }
+
+
+def _to_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip().replace(" ", "").replace(",", ".")
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    radius_km = 6371.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+    a = math.sin(delta_phi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return radius_km * c
+
+
+def _geo_field_keys(fields: list[dict[str, Any]]) -> tuple[str | None, str | None]:
+    latitude_key = next((field.get("key") for field in fields if field.get("field_type") == "geo_latitude"), None)
+    longitude_key = next((field.get("key") for field in fields if field.get("field_type") == "geo_longitude"), None)
+    return latitude_key, longitude_key
+
+
+def _filter_rows_by_geo_radius(
+    rows: list[dict[str, Any]],
+    fields: list[dict[str, Any]],
+    *,
+    target_row_id: str | None,
+    radius_km: float | None,
+) -> list[dict[str, Any]]:
+    if not rows or not target_row_id or radius_km is None or radius_km <= 0:
+        return rows
+    latitude_key, longitude_key = _geo_field_keys(fields)
+    if not latitude_key or not longitude_key:
+        return rows
+    target_row = next((row for row in rows if str(row.get("id")) == str(target_row_id)), None)
+    if not target_row:
+        return rows
+    target_values = target_row.get("values") or {}
+    target_lat = _to_float(target_values.get(latitude_key))
+    target_lon = _to_float(target_values.get(longitude_key))
+    if target_lat is None or target_lon is None:
+        return rows
+
+    filtered: list[dict[str, Any]] = []
+    for row in rows:
+        if str(row.get("id")) == str(target_row_id):
+            filtered.append(row)
+            continue
+        values = row.get("values") or {}
+        lat = _to_float(values.get(latitude_key))
+        lon = _to_float(values.get(longitude_key))
+        if lat is None or lon is None:
+            continue
+        if _haversine_km(target_lat, target_lon, lat, lon) <= radius_km:
+            filtered.append(row)
+    return filtered
 
 
 async def fetch_preview(*, filename: str, body: bytes) -> dict[str, Any]:
@@ -156,23 +221,23 @@ async def profile_imported_dataset(
     detail_level: ProfileDetailLevel = "detailed",
 ) -> dict[str, Any]:
     started_at = start_timer()
-    payload = DatasetProfileRequest(
-        dataset=DatasetPayload(rows=[DatasetRow.model_validate(row) for row in rows]),
+    result = profile_rows(
+        rows,
         max_unique_values=30,
         histogram_bins=histogram_bins,
         histogram_bins_by_field=histogram_bins_by_field or {},
         detail_level=detail_level,
     )
-    result = profile_dataset(payload).model_dump()
+    result_payload = result.model_dump()
     pipeline_logger.info(
         "profile_imported_dataset_completed rows=%r fields_count=%r histogram_bins=%r detail_level=%r duration_ms=%.2f",
         len(rows),
-        len(result.get("fields") or []),
+        len(result_payload.get("fields") or []),
         histogram_bins,
         detail_level,
         elapsed_ms(started_at),
     )
-    return result
+    return result_payload
 
 
 async def fetch_dataset_profile(*, filename: str, body: bytes, detail_level: ProfileDetailLevel = "detailed") -> dict[str, Any]:
@@ -462,7 +527,9 @@ def _sanitize_fields_for_preprocessing(fields: list[dict[str, Any]]) -> list[dic
         item = dict(field)
         if item.get("missing_strategy") == "constant" and item.get("missing_constant") is None:
             item["missing_constant"] = 0 if item.get("field_type") in {"numeric", "integer", "float"} else "unknown"
-        if item.get("field_type") in {"numeric", "integer", "float"} and item.get("normalization") in {None, "", "none"}:
+        if item.get("field_type") in {"geo_latitude", "geo_longitude"}:
+            item["normalization"] = "none"
+        elif item.get("field_type") in {"numeric", "integer", "float"} and item.get("normalization") in {None, "", "none"}:
             item["normalization"] = "minmax"
         sanitized.append(item)
     return sanitized
@@ -504,6 +571,12 @@ async def run_pipeline_via_services(
         }
         for row in preprocessing["dataset"]
     ]
+    processed_rows = _filter_rows_by_geo_radius(
+        processed_rows,
+        fields_payload,
+        target_row_id=payload.config.target_row_id,
+        radius_km=payload.config.geo_radius_km,
+    )
     analysis = await analyze_dataset(
         rows=processed_rows,
         criteria=_prepare_criteria_for_analysis(

@@ -1,4 +1,4 @@
-export type InferredType = "numeric" | "integer" | "float" | "categorical" | "binary" | "text" | "datetime";
+export type InferredType = "numeric" | "integer" | "float" | "geo_latitude" | "geo_longitude" | "categorical" | "binary" | "text" | "datetime";
 export type AnalysisMode = "rating" | "analog_search";
 
 export type PreviewColumn = {
@@ -114,6 +114,7 @@ export type FieldConfig = {
   key: string;
   field_type: InferredType;
   include_in_output: boolean;
+  use_in_label?: boolean;
   missing_strategy: string;
   missing_constant?: unknown;
   outlier_method: string;

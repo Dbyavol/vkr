@@ -37,7 +37,7 @@ import type {
 } from "./types";
 
 type StageId = "data" | "preprocessing" | "criteria" | "results" | "projects" | "history" | "admin";
-type PrepSectionId = "types" | "missing" | "outliers" | "encoding" | "scaling";
+type PrepSectionId = "preview" | "types" | "missing" | "outliers" | "encoding" | "scaling";
 type ChartMode = "histogram" | "boxplot";
 const DATETIME_FORMAT_OPTIONS = [
   "YYYY-MM-DD",
@@ -58,14 +58,18 @@ const stages: Array<{ id: StageId; title: string; caption: string }> = [
 ];
 
 const prepSections: Array<{ id: PrepSectionId; title: string; caption: string }> = [
-  { id: "types", title: "Типы данных", caption: "Единый выбор типа по колонкам" },
-  { id: "encoding", title: "Энкодинг", caption: "Кодирование категориальных колонок" },
-  { id: "missing", title: "Пропуски", caption: "Строки с missing и действие по колонке" },
-  { id: "outliers", title: "Выбросы", caption: "Графики и действие по числовым колонкам" },
-  { id: "scaling", title: "Масштабирование", caption: "Нормализация числовых признаков" },
+  { id: "preview", title: "Предпросмотр", caption: "" },
+  { id: "types", title: "Типы данных", caption: "" },
+  { id: "encoding", title: "Энкодинг", caption: "" },
+  { id: "missing", title: "Пропуски", caption: "" },
+  { id: "outliers", title: "Выбросы", caption: "" },
+  { id: "scaling", title: "Масштабирование", caption: "" },
 ];
 
 const numericNameHints = ["price", "cost", "area", "rating", "score", "days", "months", "amount", "value"];
+const labelFieldHints = ["name", "title", "object_name", "address", "location", "city", "district", "street"];
+const geoLatitudeHints = ["latitude", "lat", "широта"];
+const geoLongitudeHints = ["longitude", "lon", "lng", "долгота"];
 
 function looksNumeric(column: PreviewColumn) {
   const samples = column.sample_values.filter((value) => value !== null && value !== "");
@@ -83,10 +87,17 @@ function isIntegerLikeColumn(column: PreviewColumn) {
 }
 
 function isNumericFieldType(fieldType: FieldConfig["field_type"]) {
-  return fieldType === "numeric" || fieldType === "integer" || fieldType === "float";
+  return fieldType === "numeric" || fieldType === "integer" || fieldType === "float" || fieldType === "geo_latitude" || fieldType === "geo_longitude";
 }
 
 function inferUiType(column: PreviewColumn): FieldConfig["field_type"] {
+  const normalizedName = column.normalized_name.toLowerCase();
+  if (geoLatitudeHints.some((hint) => normalizedName.includes(hint))) {
+    return "geo_latitude";
+  }
+  if (geoLongitudeHints.some((hint) => normalizedName.includes(hint))) {
+    return "geo_longitude";
+  }
   if (looksNumeric(column) || numericNameHints.some((hint) => column.normalized_name.includes(hint))) {
     return isIntegerLikeColumn(column) ? "integer" : "float";
   }
@@ -98,6 +109,55 @@ function uniqueSamples(column: PreviewColumn) {
 }
 
 function categoriesForField(preview: PreviewResponse | null, key: string, column?: PreviewColumn) {
+  return categoryCountsForField(preview, key, undefined, column).map((item) => item.label);
+}
+
+function rawCategoryCountsForField(
+  preview: PreviewResponse | null,
+  key: string,
+  column?: PreviewColumn,
+) {
+  const counts = new Map<string, number>();
+  for (const row of preview?.normalized_dataset?.rows ?? []) {
+    const value = row.values[key];
+    if (value === null || value === undefined || value === "") continue;
+    const label = String(value);
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+
+  if (counts.size) {
+    return Array.from(counts.entries())
+      .map(([label, value]) => ({ label, value }))
+      .sort((left, right) => right.value - left.value || left.label.localeCompare(right.label));
+  }
+
+  return column ? uniqueSamples(column).map((label) => ({ label, value: 1 })) : [];
+}
+
+function categoryCountsForField(
+  preview: PreviewResponse | null,
+  key: string,
+  fieldProfile?: FieldProfile,
+  column?: PreviewColumn,
+) {
+  if (fieldProfile?.top_categories?.length) {
+    return [...fieldProfile.top_categories].sort((left, right) => right.value - left.value || left.label.localeCompare(right.label));
+  }
+
+  const counts = new Map<string, number>();
+  for (const row of preview?.normalized_dataset?.rows ?? []) {
+    const value = row.values[key];
+    if (value === null || value === undefined || value === "") continue;
+    const label = String(value);
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+
+  if (counts.size) {
+    return Array.from(counts.entries())
+      .map(([label, value]) => ({ label, value }))
+      .sort((left, right) => right.value - left.value || left.label.localeCompare(right.label));
+  }
+
   const fromRows = Array.from(
     new Set(
       (preview?.normalized_dataset?.rows ?? [])
@@ -106,13 +166,47 @@ function categoriesForField(preview: PreviewResponse | null, key: string, column
         .map(String),
     ),
   );
-  if (fromRows.length) return fromRows;
-  return column ? uniqueSamples(column) : [];
+  if (fromRows.length) return fromRows.map((label) => ({ label, value: 1 }));
+  return column ? uniqueSamples(column).map((label) => ({ label, value: 1 })) : [];
 }
 
 function buildOrdinalMap(samples: string[]) {
   if (!samples.length) return undefined;
   return Object.fromEntries(samples.map((value, index) => [value, Number(((index + 1) / samples.length).toFixed(2))]));
+}
+
+function mergeOrdinalMap(samples: string[], currentMap?: Record<string, number>) {
+  const recommendedMap = buildOrdinalMap(samples) ?? {};
+  if (!currentMap || !Object.keys(currentMap).length) {
+    return recommendedMap;
+  }
+  return {
+    ...recommendedMap,
+    ...currentMap,
+  };
+}
+
+function looksLikeLabelField(column: PreviewColumn) {
+  const key = column.normalized_name.toLowerCase();
+  return labelFieldHints.some((hint) => key.includes(hint));
+}
+
+function buildObjectLabel(
+  row: { id: string; values: Record<string, unknown> } | undefined,
+  fields: FieldConfig[],
+) {
+  if (!row) return "";
+  const labelKeys = fields.filter((field) => field.use_in_label).map((field) => field.key);
+  const values = labelKeys
+    .map((key) => row.values[key])
+    .filter((value) => value !== null && value !== undefined && String(value).trim() !== "")
+    .map((value) => String(value).trim());
+  if (values.length) return values.join(" · ");
+  return String(row.values.name ?? row.values.title ?? row.values.object_name ?? `Объект ${row.id}`);
+}
+
+function findGeoFieldKey(fields: FieldConfig[], role: "geo_latitude" | "geo_longitude") {
+  return fields.find((field) => field.field_type === role && field.include_in_output)?.key ?? null;
 }
 
 function applyModeDefaultsToCriteria(criteria: CriterionConfig[], mode: AnalysisMode): CriterionConfig[] {
@@ -125,6 +219,23 @@ function applyModeDefaultsToCriteria(criteria: CriterionConfig[], mode: Analysis
 function enforceRequiredScaling(fields: FieldConfig[]): FieldConfig[] {
   let changed = false;
   const next = fields.map((field) => {
+    if (field.field_type === "categorical") {
+      const nextOrdinalMap =
+        field.ordinal_map && Object.keys(field.ordinal_map).length
+          ? field.ordinal_map
+          : { low: 0.25, medium: 0.5, high: 1 };
+      if (field.encoding !== "ordinal" || !field.ordinal_map || !Object.keys(field.ordinal_map).length) {
+        changed = true;
+        return { ...field, encoding: "ordinal", ordinal_map: nextOrdinalMap };
+      }
+    }
+    if (field.field_type === "geo_latitude" || field.field_type === "geo_longitude") {
+      if (field.normalization !== "none") {
+        changed = true;
+        return { ...field, normalization: "none" };
+      }
+      return field;
+    }
     if (isNumericFieldType(field.field_type) && (field.normalization === "none" || field.normalization === "")) {
       changed = true;
       return { ...field, normalization: "minmax" };
@@ -141,11 +252,12 @@ function fieldDefaults(column: PreviewColumn): FieldConfig {
     key: column.normalized_name,
     field_type: fieldType,
     include_in_output: true,
+    use_in_label: looksLikeLabelField(column),
     missing_strategy: "none",
     outlier_method: "none",
     outlier_threshold: 1.5,
-    normalization: isNumericFieldType(fieldType) ? "minmax" : "none",
-    encoding: "none",
+    normalization: fieldType === "geo_latitude" || fieldType === "geo_longitude" ? "none" : (isNumericFieldType(fieldType) ? "minmax" : "none"),
+    encoding: fieldType === "categorical" ? "ordinal" : "none",
     rounding_precision: fieldType === "float" ? 2 : null,
     datetime_format: fieldType === "datetime" ? "YYYY-MM-DD" : null,
     ordinal_map: fieldType === "categorical" ? buildOrdinalMap(categories) : undefined,
@@ -460,7 +572,11 @@ function criteriaDefaults(
   recommendedWeights?: Record<string, number>,
   analysisMode: AnalysisMode = "rating",
 ): CriterionConfig[] {
-  const analyticFields = fields.filter((field) => field.field_type !== "text" && field.field_type !== "datetime" && field.include_in_output);
+  const analyticFields = fields.filter(
+    (field) =>
+      !["text", "datetime", "geo_latitude", "geo_longitude"].includes(field.field_type)
+      && field.include_in_output,
+  );
   const fallbackWeight = analyticFields.length ? Number((1 / analyticFields.length).toFixed(4)) : 1;
   return analyticFields.map((field) => ({
     key: field.key,
@@ -470,6 +586,52 @@ function criteriaDefaults(
     direction: analysisMode === "analog_search" ? "target" : "maximize",
     scale_map: field.ordinal_map ?? field.binary_map,
   }));
+}
+
+function normalizeCriteriaWeights(criteria: CriterionConfig[]): CriterionConfig[] {
+  if (!criteria.length) return criteria;
+  const total = criteria.reduce((sum, item) => sum + Number(item.weight || 0), 0);
+  if (total <= 0) {
+    const equalWeight = Number((1 / criteria.length).toFixed(4));
+    const equalized = criteria.map((item) => ({ ...item, weight: equalWeight }));
+    const drift = Number((1 - equalized.reduce((sum, item) => sum + item.weight, 0)).toFixed(4));
+    if (equalized.length && drift) {
+      equalized[0] = { ...equalized[0], weight: Number((equalized[0].weight + drift).toFixed(4)) };
+    }
+    return equalized;
+  }
+  const normalized = criteria.map((item) => ({
+    ...item,
+    weight: Number((Number(item.weight || 0) / total).toFixed(4)),
+  }));
+  const drift = Number((1 - normalized.reduce((sum, item) => sum + item.weight, 0)).toFixed(4));
+  if (normalized.length && drift) {
+    normalized[0] = { ...normalized[0], weight: Number((normalized[0].weight + drift).toFixed(4)) };
+  }
+  return normalized;
+}
+
+function syncCriteriaWithFields(
+  fields: FieldConfig[],
+  currentCriteria: CriterionConfig[],
+  recommendedWeights?: Record<string, number>,
+  analysisMode: AnalysisMode = "rating",
+): CriterionConfig[] {
+  const defaults = criteriaDefaults(fields, recommendedWeights, analysisMode);
+  const currentByKey = new Map(currentCriteria.map((item) => [item.key, item]));
+  const synced = defaults.map((item) => {
+    const current = currentByKey.get(item.key);
+    if (!current) return item;
+    return {
+      ...item,
+      name: current.name || item.name,
+      weight: current.weight,
+      direction: analysisMode === "analog_search" ? "target" : current.direction,
+      scale_map: current.scale_map ?? item.scale_map,
+      target_value: current.target_value ?? item.target_value,
+    };
+  });
+  return normalizeCriteriaWeights(synced);
 }
 
 const SUMMARY_LABELS: Record<string, string> = {
@@ -569,6 +731,8 @@ const FIELD_TYPE_LABELS: Record<string, string> = {
   numeric: "Числовой",
   integer: "Целое Число",
   float: "Дробное Число",
+  geo_latitude: "Гео широта",
+  geo_longitude: "Гео долгота",
   categorical: "Категориальный",
   binary: "Бинарный",
   text: "Текстовый",
@@ -577,7 +741,6 @@ const FIELD_TYPE_LABELS: Record<string, string> = {
 
 const METHOD_LABELS: Record<string, string> = {
   none: "Не применять",
-  one_hot: "One-hot",
   ordinal: "Порядковый",
   binary_map: "Бинарная карта",
   median: "Заполнить медианой",
@@ -681,6 +844,7 @@ type HistoryParameters = {
   fields?: FieldConfig[];
   criteria?: CriterionConfig[];
   target_row_id?: string | null;
+  geo_radius_km?: number | null;
   analysis_mode?: AnalysisMode;
   project_id?: number | null;
   scenario_title?: string | null;
@@ -721,6 +885,7 @@ function compactPipelineResultForStorage(result: PipelineResult | null | undefin
 type SavedWorkflowState = {
   activeStage?: StageId;
   datasetFileId?: number | null;
+  rawPreview?: PreviewResponse | null;
   preview?: PreviewResponse | null;
   profile?: FieldProfile[];
   quality?: DatasetQualityReport | null;
@@ -731,6 +896,7 @@ type SavedWorkflowState = {
   criteria?: CriterionConfig[];
   analysisMode?: AnalysisMode;
   targetRowId?: string;
+  geoRadiusKm?: number | null;
   result?: PipelineResult | null;
   activeProjectId?: number | null;
   historyProjectFilter?: number | "all";
@@ -1043,6 +1209,175 @@ function ResultBarChart({
   );
 }
 
+function RadarComparisonChart({
+  item,
+  baseline,
+}: {
+  item?: RankedItem;
+  baseline?: RankedItem;
+}) {
+  if (!item) {
+    return <p className="muted-note">Выберите объект, чтобы увидеть профиль признаков на радаре.</p>;
+  }
+
+  const contributions = item.contributions.slice(0, 8);
+  if (!contributions.length) {
+    return <p className="muted-note">Для выбранного объекта пока нет данных для radar chart.</p>;
+  }
+
+  const baselineByKey = new Map((baseline?.contributions ?? []).map((contribution) => [contribution.key, contribution]));
+  const centerX = 130;
+  const centerY = 126;
+  const radius = 82;
+
+  const polygonPoints = contributions.map((contribution, index) => {
+    const angle = (-Math.PI / 2) + (index / contributions.length) * Math.PI * 2;
+    const valueRadius = radius * Math.max(0, Math.min(1, contribution.normalized_value));
+    return {
+      x: centerX + Math.cos(angle) * valueRadius,
+      y: centerY + Math.sin(angle) * valueRadius,
+      labelX: centerX + Math.cos(angle) * (radius + 22),
+      labelY: centerY + Math.sin(angle) * (radius + 22),
+      axisX: centerX + Math.cos(angle) * radius,
+      axisY: centerY + Math.sin(angle) * radius,
+    };
+  });
+
+  const baselinePoints = contributions.map((contribution, index) => {
+    const baselineContribution = baselineByKey.get(contribution.key);
+    const baselineValue = baselineContribution?.normalized_value ?? 0;
+    const angle = (-Math.PI / 2) + (index / contributions.length) * Math.PI * 2;
+    const valueRadius = radius * Math.max(0, Math.min(1, baselineValue));
+    return `${centerX + Math.cos(angle) * valueRadius},${centerY + Math.sin(angle) * valueRadius}`;
+  });
+
+  const selectedPolygon = polygonPoints.map((point) => `${point.x},${point.y}`).join(" ");
+  const baselinePolygon = baselinePoints.join(" ");
+
+  return (
+    <div className="analytics-card">
+      <div className="chart-head">
+        <div>
+          <span className="section-kicker">Radar chart</span>
+          <h3>Профиль критериев</h3>
+          <p className="chart-subtitle">Сравнение выбранного объекта с лидером текущего рейтинга.</p>
+        </div>
+      </div>
+      <svg className="radar-chart" viewBox="0 0 260 260" role="img" aria-label="Радар критериев">
+        {[0.25, 0.5, 0.75, 1].map((level) => (
+          <circle
+            key={level}
+            cx={centerX}
+            cy={centerY}
+            r={radius * level}
+            fill="none"
+            stroke="#d7dde8"
+            strokeDasharray={level === 1 ? "0" : "4 4"}
+          />
+        ))}
+        {polygonPoints.map((point, index) => (
+          <g key={contributions[index].key}>
+            <line x1={centerX} y1={centerY} x2={point.axisX} y2={point.axisY} stroke="#d7dde8" />
+            <text
+              x={point.labelX}
+              y={point.labelY}
+              textAnchor={point.labelX < centerX - 12 ? "end" : point.labelX > centerX + 12 ? "start" : "middle"}
+              fontSize="9.5"
+              fill="#334155"
+            >
+              {contributions[index].name}
+            </text>
+          </g>
+        ))}
+        {baseline ? <polygon points={baselinePolygon} fill="rgba(15, 23, 42, 0.08)" stroke="#64748b" strokeWidth="2" /> : null}
+        <polygon points={selectedPolygon} fill="rgba(14, 116, 144, 0.22)" stroke="#0f766e" strokeWidth="2.5" />
+      </svg>
+      <div className="chart-legend">
+        <span><i style={{ background: "#0f766e" }} />Выбранный объект</span>
+        {baseline ? <span><i style={{ background: "#64748b" }} />Лидер рейтинга</span> : null}
+      </div>
+    </div>
+  );
+}
+
+function ContributionWaterfallChart({
+  item,
+  mode,
+}: {
+  item?: RankedItem;
+  mode: AnalysisMode;
+}) {
+  if (!item) {
+    return <p className="muted-note">Выберите объект, чтобы увидеть структуру итоговой оценки.</p>;
+  }
+
+  const contributions = item.contributions.slice(0, 10);
+  if (!contributions.length) {
+    return <p className="muted-note">Для выбранного объекта пока нет вкладов критериев.</p>;
+  }
+
+  const steps = contributions.map((contribution) => ({
+    ...contribution,
+    start: 0,
+    end: 0,
+  }));
+  let running = 0;
+  for (const step of steps) {
+    step.start = running;
+    running += step.contribution;
+    step.end = running;
+  }
+
+  const minValue = Math.min(0, ...steps.map((step) => Math.min(step.start, step.end)));
+  const maxValue = Math.max(
+    mode === "analog_search" && item.similarity_to_target !== null && item.similarity_to_target !== undefined
+      ? item.similarity_to_target
+      : item.score,
+    ...steps.map((step) => Math.max(step.start, step.end)),
+    0.0001,
+  );
+  const range = Math.max(maxValue - minValue, 0.0001);
+  const zeroOffset = ((0 - minValue) / range) * 100;
+
+  return (
+    <div className="analytics-card">
+      <div className="chart-head">
+        <div>
+          <span className="section-kicker">Waterfall</span>
+          <h3>Структура итоговой оценки</h3>
+          <p className="chart-subtitle">Каждая полоса показывает вклад критерия в итоговый результат объекта.</p>
+        </div>
+      </div>
+      <div className="waterfall-list">
+        {steps.map((contribution) => {
+          const left = ((Math.min(contribution.start, contribution.end) - minValue) / range) * 100;
+          const width = Math.max(2, (Math.abs(contribution.end - contribution.start) / range) * 100);
+          const isPositive = contribution.contribution >= 0;
+          return (
+            <div className="waterfall-row" key={contribution.key}>
+              <div className="waterfall-meta">
+                <strong>{contribution.name}</strong>
+                <span>{objectValueLabel(contribution.raw_value)}</span>
+              </div>
+              <div className="waterfall-track">
+                <span className="waterfall-zero" style={{ left: `${zeroOffset}%` }} />
+                <span
+                  className={`waterfall-bar ${isPositive ? "positive" : "negative"}`}
+                  style={{ left: `${left}%`, width: `${width}%` }}
+                />
+              </div>
+              <strong className={`waterfall-value ${isPositive ? "positive" : "negative"}`}>
+                {contribution.contribution >= 0 ? "+" : ""}
+                {contribution.contribution.toFixed(3)}
+              </strong>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function ObjectDetailsPanel({
   item,
   mode,
@@ -1141,6 +1476,7 @@ export function App() {
   const [file, setFile] = useState<File | null>(null);
   const [datasetFileId, setDatasetFileId] = useState<number | null>(savedWorkflow.datasetFileId ?? null);
   const [sourceFilename, setSourceFilename] = useState(savedWorkflow.sourceFilename ?? "");
+  const [rawPreview, setRawPreview] = useState<PreviewResponse | null>(savedWorkflow.rawPreview ?? savedWorkflow.preview ?? null);
   const [preview, setPreview] = useState<PreviewResponse | null>(savedWorkflow.preview ?? null);
   const [profile, setProfile] = useState<FieldProfile[]>(savedWorkflow.profile ?? []);
   const [quality, setQuality] = useState<DatasetQualityReport | null>(savedWorkflow.quality ?? null);
@@ -1156,6 +1492,7 @@ export function App() {
   const [criteria, setCriteria] = useState<CriterionConfig[]>(savedWorkflow.criteria ?? []);
   const [analysisMode, setAnalysisMode] = useState<AnalysisMode>(savedWorkflow.analysisMode ?? "analog_search");
   const [targetRowId, setTargetRowId] = useState(savedWorkflow.targetRowId ?? "");
+  const [geoRadiusKm, setGeoRadiusKm] = useState<number | null>(savedWorkflow.geoRadiusKm ?? null);
   const [result, setResult] = useState<PipelineResult | null>(() => normalizePipelineResult(savedWorkflow.result ?? null));
   const [selectedResultId, setSelectedResultId] = useState(savedWorkflow.result?.ranking?.[0]?.object_id ?? "");
   const [resultsPage, setResultsPage] = useState(1);
@@ -1171,6 +1508,14 @@ export function App() {
   const [profileDetailsLoading, setProfileDetailsLoading] = useState(false);
 
   const totalWeight = useMemo(() => criteria.reduce((sum, item) => sum + Number(item.weight || 0), 0), [criteria]);
+  const activePreprocessingFields = useMemo(
+    () => fields.filter((field) => field.include_in_output),
+    [fields],
+  );
+  const visiblePreviewColumns = useMemo(() => {
+    const allowed = new Set(activePreprocessingFields.map((field) => field.key));
+    return (preview?.columns ?? []).filter((column) => allowed.has(column.normalized_name));
+  }, [activePreprocessingFields, preview]);
   const completedStages = {
     data: Boolean(preview),
     preprocessing: fields.length > 0,
@@ -1206,6 +1551,18 @@ export function App() {
     const ids = new Set(missingMatrixPreview.map((item) => item.id));
     return rows.filter((row) => ids.has(row.id)).slice(0, 14);
   }, [preview, missingMatrixPreview]);
+  const transformedPreviewRows = useMemo(
+    () => (preview?.normalized_dataset?.rows ?? []).slice(0, 40),
+    [preview],
+  );
+  const objectLabelMap = useMemo(() => {
+    const rows = preview?.normalized_dataset?.rows ?? [];
+    return new Map(rows.map((row) => [row.id, buildObjectLabel(row, fields)]));
+  }, [preview, fields]);
+  const encodingPreview = rawPreview ?? preview;
+  const geoLatitudeKey = useMemo(() => findGeoFieldKey(fields, "geo_latitude"), [fields]);
+  const geoLongitudeKey = useMemo(() => findGeoFieldKey(fields, "geo_longitude"), [fields]);
+  const geoSearchAvailable = Boolean(geoLatitudeKey && geoLongitudeKey);
   const fullDatasetOutlierTotal = useMemo(
     () => profile.filter((field) => ["numeric", "integer", "float"].includes(field.inferred_type)).reduce((sum, field) => sum + field.outlier_count_iqr, 0),
     [profile],
@@ -1238,6 +1595,17 @@ export function App() {
     setProfileDetailLevel(nextDetailLevel);
   }
 
+  async function loadRawStoredPreview(nextDatasetFileId: number, nextFilename: string) {
+    try {
+      const response = await fetchStoredProfile(nextDatasetFileId, nextFilename, {
+        detailLevel: "summary",
+      });
+      setRawPreview(response.preview);
+    } catch (previewError) {
+      console.error(previewError);
+    }
+  }
+
   async function loadDetailedStoredProfile(nextDatasetFileId: number, nextFilename: string, nextFields?: FieldConfig[]) {
     setProfileDetailsLoading(true);
     try {
@@ -1262,7 +1630,7 @@ export function App() {
   }
 
   function buildOrdinalMapForField(fieldKey: string) {
-    const column = preview?.columns.find((item) => item.normalized_name === fieldKey);
+    const column = encodingPreview?.columns.find((item) => item.normalized_name === fieldKey);
     const samples = column ? uniqueSamples(column) : [];
     return buildOrdinalMap(samples) ?? { low: 0.25, medium: 0.5, high: 1 };
   }
@@ -1270,6 +1638,13 @@ export function App() {
   function updateFieldEncoding(index: number, encoding: FieldConfig["encoding"]) {
     const field = fields[index];
     if (!field) return;
+    if (field.field_type === "categorical" && encoding !== "ordinal") {
+      updateField(index, {
+        encoding: "ordinal",
+        ordinal_map: field.ordinal_map && Object.keys(field.ordinal_map).length ? field.ordinal_map : buildOrdinalMapForField(field.key),
+      });
+      return;
+    }
     if (encoding === "ordinal") {
       updateField(index, {
         encoding,
@@ -1330,6 +1705,7 @@ export function App() {
     setFile(null);
     setDatasetFileId(null);
     setSourceFilename("");
+    setRawPreview(null);
     setPreview(null);
     setProfile([]);
     setQuality(null);
@@ -1341,6 +1717,7 @@ export function App() {
     setCriteria([]);
     setAnalysisMode("analog_search");
     setTargetRowId("");
+    setGeoRadiusKm(null);
     setResult(null);
     setSelectedResultId("");
     setResultsPage(1);
@@ -1439,13 +1816,20 @@ export function App() {
       const nextFields = profile.length
         ? profile.map((field) => ({
             ...field.recommended_config,
+            use_in_label: field.recommended_config.use_in_label ?? looksLikeLabelField({
+              source_name: field.key,
+              normalized_name: field.key,
+              inferred_type: field.inferred_type,
+              missing_count: field.missing_count,
+              unique_count: field.unique_count,
+              sample_values: field.sample_values,
+            }),
             missing_strategy: "none",
             outlier_method: "none",
             normalization: isNumericFieldType(field.recommended_config.field_type) ? "minmax" : "none",
-            encoding: "none",
           }))
         : preview.columns.map((column) => fieldDefaults(column));
-      setFields(nextFields);
+      setFields(enforceRequiredScaling(nextFields));
       const nextHistogramBinsByField = Object.fromEntries(
         nextFields
           .filter((field) => isNumericFieldType(field.field_type))
@@ -1466,14 +1850,59 @@ export function App() {
 
   useEffect(() => {
     if (activeStage !== "criteria") return;
-    if (!fields.length || criteria.length) return;
-    setCriteria(criteriaDefaults(fields, recommendedWeights, analysisMode));
-  }, [activeStage, fields, criteria.length, recommendedWeights, analysisMode]);
+    if (!fields.length) return;
+    const nextCriteria = syncCriteriaWithFields(fields, criteria, recommendedWeights, analysisMode);
+    const hasChanged =
+      nextCriteria.length !== criteria.length
+      || nextCriteria.some((item, index) => {
+        const current = criteria[index];
+        return (
+          !current
+          || current.key !== item.key
+          || current.name !== item.name
+          || current.weight !== item.weight
+          || current.direction !== item.direction
+          || JSON.stringify(current.scale_map ?? null) !== JSON.stringify(item.scale_map ?? null)
+          || current.target_value !== item.target_value
+        );
+      });
+    if (hasChanged) {
+      setCriteria(nextCriteria);
+    }
+  }, [activeStage, fields, criteria, recommendedWeights, analysisMode]);
+
+  useEffect(() => {
+    if (activeStage !== "preprocessing") return;
+    if (!fields.length) return;
+    setFields((current) => {
+      let changed = false;
+      const next = current.map((field) => {
+        if (field.field_type !== "categorical") return field;
+        const column = encodingPreview?.columns.find((item) => item.normalized_name === field.key);
+        const categories = rawCategoryCountsForField(encodingPreview, field.key, column).map((item) => item.label);
+        const nextOrdinalMap = mergeOrdinalMap(categories, field.ordinal_map);
+        const sameMap =
+          Object.keys(nextOrdinalMap).length === Object.keys(field.ordinal_map ?? {}).length
+          && Object.entries(nextOrdinalMap).every(([key, value]) => field.ordinal_map?.[key] === value);
+        if (field.encoding !== "ordinal" || !sameMap) {
+          changed = true;
+          return {
+            ...field,
+            encoding: "ordinal",
+            ordinal_map: nextOrdinalMap,
+          };
+        }
+        return field;
+      });
+      return changed ? next : current;
+    });
+  }, [activeStage, fields.length, encodingPreview]);
 
   useEffect(() => {
     const state: SavedWorkflowState = {
       activeStage,
       datasetFileId,
+      rawPreview,
       preview,
       profile,
       quality,
@@ -1485,6 +1914,7 @@ export function App() {
       criteria,
       analysisMode,
       targetRowId,
+      geoRadiusKm,
       result: compactPipelineResultForStorage(result),
       activeProjectId,
       historyProjectFilter,
@@ -1502,6 +1932,7 @@ export function App() {
       const fallbackState: SavedWorkflowState = {
         activeStage,
         datasetFileId,
+        rawPreview,
         preview,
         profile,
         quality,
@@ -1513,6 +1944,7 @@ export function App() {
         criteria,
         analysisMode,
         targetRowId,
+        geoRadiusKm,
         result: null,
         activeProjectId,
         historyProjectFilter,
@@ -1532,6 +1964,7 @@ export function App() {
   }, [
     activeStage,
     datasetFileId,
+    rawPreview,
     preview,
     profile,
     quality,
@@ -1620,6 +2053,7 @@ export function App() {
       setFile(null);
       setDatasetFileId(null);
       setSourceFilename("");
+      setRawPreview(null);
       setPreview(null);
       setProfile([]);
       setQuality(null);
@@ -1648,6 +2082,7 @@ export function App() {
         setFile(null);
         setDatasetFileId(null);
         setSourceFilename("");
+        setRawPreview(null);
         setPreview(null);
         setProfile([]);
         setQuality(null);
@@ -1682,6 +2117,7 @@ export function App() {
       setFields(normalizedFields);
       setCriteria(nextCriteria.length ? nextCriteria : criteriaDefaults(normalizedFields, recommendedWeights, parameters.analysis_mode === "rating" ? "rating" : "analog_search"));
       setTargetRowId(parameters.target_row_id ?? "");
+      setGeoRadiusKm(parameters.geo_radius_km ?? null);
       setAnalysisMode(parameters.analysis_mode === "rating" ? "rating" : "analog_search");
       setScenarioTitle(parameters.scenario_title ?? latest.title);
       setDatasetFileId(latest.dataset_file_id ?? null);
@@ -1697,6 +2133,7 @@ export function App() {
         const response = await refreshPreprocessing(latest.dataset_file_id, normalizedFields, latest.source_filename ?? undefined, {
           histogramBinsByField: nextHistogramBinsByField,
         });
+        setRawPreview((current) => current ?? response.preview);
         setPreview(response.preview);
         setProfile(response.profile.fields);
         setQuality(response.profile.quality);
@@ -1708,6 +2145,7 @@ export function App() {
         setHistogramDraftBinsByField(nextHistogramBinsByField);
         setChartModeByField({});
       } else {
+        setRawPreview(null);
         setPreview(null);
         setProfile([]);
         setQuality(null);
@@ -1748,6 +2186,7 @@ export function App() {
       setCriteria(parameters.criteria);
     }
     setTargetRowId(parameters.target_row_id ?? "");
+    setGeoRadiusKm(parameters.geo_radius_km ?? null);
     updateAnalysisMode(parameters.analysis_mode === "rating" ? "rating" : "analog_search");
     setActiveProjectId(parameters.project_id ?? item.project_id ?? null);
     setScenarioTitle(`${item.title} (повтор)`);
@@ -1775,6 +2214,7 @@ export function App() {
       const response = await profileFile(file);
       setDatasetFileId(response.dataset_file_id ?? null);
       setSourceFilename(file.name);
+      setRawPreview(response.preview);
       setPreview(response.preview);
       setProfile([]);
       setQuality(null);
@@ -1811,6 +2251,7 @@ export function App() {
         effectiveFields,
         criteria,
         analysisMode === "analog_search" ? targetRowId : undefined,
+        analysisMode === "analog_search" ? geoRadiusKm : null,
         analysisMode,
         token || undefined,
         activeProjectId,
@@ -1849,7 +2290,7 @@ export function App() {
 
   async function applyPreprocessingSection(section: PrepSectionId) {
     if (!datasetFileId) {
-      setError("Сначала загрузите и профилируйте датасет на этапе «Данные».");
+      setError("Сначала загрузите датасет.");
       return;
     }
     setApplyingSection(section);
@@ -1910,7 +2351,7 @@ export function App() {
     if (!field) return;
     const fieldProfile = profile.find((item) => item.key === field.key);
     if (fieldProfile) {
-      updateField(index, fieldProfile.recommended_config);
+      updateField(index, { ...fieldProfile.recommended_config, use_in_label: field.use_in_label });
       return;
     }
     if (isNumericFieldType(field.field_type)) {
@@ -1969,12 +2410,21 @@ export function App() {
   }
 
   function applyRecommendedWeights() {
-    setCriteria((current) =>
-      current.map((item) => ({
-        ...item,
-        weight: recommendedWeights[item.key] ?? item.weight,
-      })),
-    );
+    setCriteria((current) => {
+      const recommended = criteriaDefaults(fields, recommendedWeights, analysisMode);
+      const currentByKey = new Map(current.map((item) => [item.key, item]));
+      const merged = recommended.map((item) => {
+        const existing = currentByKey.get(item.key);
+        return {
+          ...item,
+          name: existing?.name || item.name,
+          direction: analysisMode === "analog_search" ? "target" : (existing?.direction ?? item.direction),
+          scale_map: existing?.scale_map ?? item.scale_map,
+          target_value: existing?.target_value ?? item.target_value,
+        };
+      });
+      return normalizeCriteriaWeights(merged);
+    });
   }
 
   function changeResultsPage(page: number) {
@@ -2166,7 +2616,7 @@ export function App() {
         <header className="topbar">
           <div>
             <h1>Сравнительный анализ объектов</h1>
-            {profileDetailsLoading ? <p className="muted-note">Расширенная аналитика догружается в фоне.</p> : null}
+            {profileDetailsLoading ? <p className="muted-note">Обновляем данные...</p> : null}
           </div>
           <div className="topbar-actions">
             <button className="ghost-button" onClick={resetWorkflow}>Новый расчет</button>
@@ -2211,15 +2661,14 @@ export function App() {
 
         {activeStage === "data" ? (
           <section className="data-stage">
-            <div className="panel project-entry-panel">
-              <div className="panel-head">
-                <div>
-                  <span className="section-kicker">Проект</span>
-                  <h2>Выберите проект перед началом</h2>
-                  <p>При выборе проекта автоматически подгружается последний сценарий: настройки, критерии и сохраненный датасет.</p>
+            {user ? (
+              <div className="panel project-entry-panel">
+                <div className="panel-head">
+                  <div>
+                    <span className="section-kicker">Проект</span>
+                    <h2>Выберите проект перед началом</h2>
+                  </div>
                 </div>
-              </div>
-              {user ? (
                 <div className="project-panel">
                   <label>
                     Текущий проект
@@ -2241,22 +2690,17 @@ export function App() {
                     Создать проект
                   </button>
                 </div>
-              ) : (
-                <p className="muted-note">Авторизуйтесь, чтобы выбрать проект и подтянуть сохраненные настройки автоматически.</p>
-              )}
-              {activeProjectId && activeProjectLatestHistory ? (
-                <p className="muted-note">Подтянут сценарий: {activeProjectLatestHistory.title} от {new Date(activeProjectLatestHistory.created_at).toLocaleString("ru-RU")}</p>
-              ) : null}
-            </div>
+                {activeProjectId && activeProjectLatestHistory ? (
+                  <p className="muted-note">Подтянут сценарий: {activeProjectLatestHistory.title} от {new Date(activeProjectLatestHistory.created_at).toLocaleString("ru-RU")}</p>
+                ) : null}
+              </div>
+            ) : null}
 
             <div className="panel hero-panel">
               <div className="hero-copy">
                 <span className="section-kicker">Этап 1</span>
                 <h2>Загрузка исходного датасета</h2>
-                <p>
-                  Поддерживаются CSV, XLSX и JSON. После загрузки система нормализует имена колонок и построит паспорт
-                  признаков.
-                </p>
+                <p>Загрузите датасет в формате CSV, XLSX или JSON.</p>
               </div>
               <div className="upload-card">
                 <label className="dropzone">
@@ -2267,6 +2711,8 @@ export function App() {
                       const selectedFile = event.target.files?.[0] ?? null;
                       setFile(selectedFile);
                       setDatasetFileId(null);
+                      setRawPreview(null);
+                      setPreview(null);
                       if (selectedFile) {
                         setSourceFilename(selectedFile.name);
                       }
@@ -2286,9 +2732,6 @@ export function App() {
                 <button className="wide-button" onClick={handlePreview} disabled={!file || loading}>
                   {loading ? "Загружаем предпросмотр..." : "Построить предпросмотр"}
                 </button>
-                <p className="muted-note">
-                  На первом этапе загружаются только первые строки и информация о колонках. Графики и расширенная аналитика считаются позже, на этапе подготовки.
-                </p>
               </div>
             </div>
 
@@ -2299,15 +2742,15 @@ export function App() {
                     <h2>Первые строки датасета</h2>
                   </div>
                   <div className="panel-head-actions">
-                    {preview ? <span className="pill">{preview.rows_total} строк</span> : null}
-                    {preview ? <span className="pill">Только предпросмотр</span> : null}
+                    {rawPreview ? <span className="pill">{rawPreview.rows_total} строк</span> : null}
+                    {rawPreview ? <span className="pill">Исходный датасет</span> : null}
                   </div>
                 </div>
-              {preview ? (
+              {rawPreview ? (
                 <>
-                  {preview.warnings.length > 0 ? (
+                  {rawPreview.warnings.length > 0 ? (
                     <div className="alert warning">
-                      {preview.warnings.slice(0, 4).map((warning) => (
+                      {rawPreview.warnings.slice(0, 4).map((warning) => (
                         <p key={warning}>{warning}</p>
                       ))}
                     </div>
@@ -2316,15 +2759,15 @@ export function App() {
                     <table>
                       <thead>
                         <tr>
-                          {preview.columns.map((column) => (
+                          {rawPreview.columns.map((column) => (
                             <th key={column.normalized_name}>{column.normalized_name}</th>
                           ))}
                         </tr>
                       </thead>
                       <tbody>
-                        {preview.preview_rows.map((row, rowIndex) => (
+                        {rawPreview.preview_rows.map((row, rowIndex) => (
                           <tr key={`preview-row-${rowIndex}`}>
-                            {preview.columns.map((column) => (
+                            {rawPreview.columns.map((column) => (
                               <td key={`${rowIndex}-${column.normalized_name}`}>
                                 {row[column.normalized_name] === null || row[column.normalized_name] === ""
                                   ? <span className="muted-cell">Пусто</span>
@@ -2338,11 +2781,11 @@ export function App() {
                   </div>
                 </>
               ) : (
-                <div className="empty-state">Здесь появится структура датасета после загрузки файла.</div>
+                <div className="empty-state">Загрузите файл, чтобы увидеть структуру датасета.</div>
               )}
             </div>
 
-            {preview ? (
+            {rawPreview ? (
               <div className="panel schema-panel">
                 <div className="panel-head">
                   <div>
@@ -2363,7 +2806,7 @@ export function App() {
                       </tr>
                     </thead>
                     <tbody>
-                      {preview.columns.map((column) => (
+                      {rawPreview.columns.map((column) => (
                         <tr key={column.normalized_name}>
                           <td>{column.normalized_name}</td>
                           <td><span className="tag">{inferUiType(column)}</span></td>
@@ -2386,7 +2829,6 @@ export function App() {
               <div>
                 <span className="section-kicker">Этап 2</span>
                 <h2>Подготовка данных</h2>
-                <p>Система не применяет преобразования автоматически: выберите только то, что действительно нужно.</p>
               </div>
               <button onClick={rebuildCriteria} disabled={fields.length === 0}>Сформировать критерии</button>
             </div>
@@ -2413,6 +2855,7 @@ export function App() {
                     </div>
                     <div className="quality-body">
                       <div className="quality-metrics">
+                        <div><span><LabelWithTip label="Строк" tip="Общее количество строк в текущем наборе данных." /></span><strong>{preview?.rows_total ?? 0}</strong></div>
                         <div><span><LabelWithTip label="Аналитических полей" tip="Количество полей, признанных пригодными для количественного сравнительного анализа." /></span><strong>{quality.analytic_fields_count}</strong></div>
                         <div><span><LabelWithTip label="Пропусков" tip="Суммарное количество отсутствующих значений в текущем наборе данных." /></span><strong>{quality.total_missing_values}</strong></div>
                         <div><span><LabelWithTip label="Выбросов IQR" tip={<><span>Количество наблюдений за границами межквартильного правила:</span><CompactFormula>x &lt; Q<sub>1</sub> - 1.5·IQR</CompactFormula><CompactFormula>x &gt; Q<sub>3</sub> + 1.5·IQR</CompactFormula><CompactFormula>IQR = Q<sub>3</sub> - Q<sub>1</sub></CompactFormula></>} /></span><strong>{fullDatasetOutlierTotal}</strong></div>
@@ -2433,21 +2876,68 @@ export function App() {
                     </button>
                   ))}
                 </div>
+                {preprocessingSection === "preview" ? (
+                  <>
+                    <div className="prep-section-head">
+                      <p>Проверьте текущий вид датасета после выбранных настроек.</p>
+                      <button onClick={() => applyPreprocessingSection("preview")} disabled={loading || !datasetFileId}>
+                        {applyingSection === "preview" ? "Применяем..." : "Применить"}
+                      </button>
+                    </div>
+                    {preview ? (
+                      <>
+                        <div className="table-wrap dataset-table wide">
+                          <table>
+                            <thead>
+                              <tr>
+                                <th>ID</th>
+                                {visiblePreviewColumns.map((column) => (
+                                  <th key={`prep-preview-head-${column.normalized_name}`}>{column.normalized_name}</th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {transformedPreviewRows.map((row) => (
+                                <tr key={`prep-preview-row-${row.id}`}>
+                                  <td>{row.id}</td>
+                                  {visiblePreviewColumns.map((column) => {
+                                    const value = row.values[column.normalized_name];
+                                    return (
+                                      <td key={`${row.id}-${column.normalized_name}`}>
+                                        {value === null || value === undefined || value === ""
+                                          ? <span className="muted-cell">Пусто</span>
+                                          : formatPreviewCell(value)}
+                                      </td>
+                                    );
+                                  })}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </>
+                    ) : (
+                      <p className="muted-note">Предпросмотр появится после загрузки и применения настроек.</p>
+                    )}
+                  </>
+                ) : null}
+
                 {preprocessingSection === "types" ? (
                   <>
                     <div className="prep-section-head">
-                      <p>Измените типы и нажмите «Применить», чтобы обновить индекс качества, таблицы и графики.</p>
+                      <p>Выберите тип данных для каждого признака и исключите лишние колонки.</p>
                       <button onClick={() => applyPreprocessingSection("types")} disabled={loading || !datasetFileId}>
                         {applyingSection === "types" ? "Применяем..." : "Применить"}
                       </button>
                     </div>
                     <div className="table-wrap compact flow-table">
-                      <table>
+                      <table className="types-table">
                         <thead>
                           <tr>
                             <th>Колонка</th>
                             <th>Примеры</th>
                             <th>Тип данных</th>
+                            <th>В названии</th>
                             <th>В сравнении</th>
                           </tr>
                         </thead>
@@ -2459,10 +2949,13 @@ export function App() {
                             return (
                               <tr key={field.key}>
                                 <td>{field.key}</td>
-                                <td>{column?.sample_values.slice(0, 3).map(String).join(", ") || "-"}</td>
+                                <td className="types-table-samples">{column?.sample_values.slice(0, 3).map(String).join(", ") || "-"}</td>
                                 <td>
                                   <div className="stacked-control">
-                                    <select
+                                    <div style={{ display: "flex", alignItems: "end", gap: "12px", flexWrap: "wrap" }}>
+                                    <label className="sub-control" style={{ flex: "1 1 220px", minWidth: 0 }}>
+                                      <span>Тип данных</span>
+                                      <select
                                       value={field.field_type}
                                       onChange={(event) => {
                                         const nextType = event.target.value as FieldConfig["field_type"];
@@ -2472,17 +2965,20 @@ export function App() {
                                           datetime_format: nextType === "datetime" ? (field.datetime_format ?? detectedDateFormat) : null,
                                         });
                                       }}
-                                    >
-                                      <option value="integer">{fieldTypeLabel("integer")}</option>
-                                      <option value="float">{fieldTypeLabel("float")}</option>
-                                      <option value="categorical">{fieldTypeLabel("categorical")}</option>
-                                      <option value="binary">{fieldTypeLabel("binary")}</option>
-                                      <option value="text">{fieldTypeLabel("text")}</option>
-                                      <option value="datetime">{fieldTypeLabel("datetime")}</option>
-                                    </select>
+                                      >
+                                        <option value="integer">{fieldTypeLabel("integer")}</option>
+                                        <option value="float">{fieldTypeLabel("float")}</option>
+                                        <option value="geo_latitude">{fieldTypeLabel("geo_latitude")}</option>
+                                        <option value="geo_longitude">{fieldTypeLabel("geo_longitude")}</option>
+                                        <option value="categorical">{fieldTypeLabel("categorical")}</option>
+                                        <option value="binary">{fieldTypeLabel("binary")}</option>
+                                        <option value="text">{fieldTypeLabel("text")}</option>
+                                        <option value="datetime">{fieldTypeLabel("datetime")}</option>
+                                      </select>
+                                    </label>
                                     {field.field_type === "float" ? (
-                                      <label className="sub-control">
-                                        <span>Знаков После Запятой</span>
+                                      <label className="sub-control" style={{ flex: "0 0 112px" }}>
+                                        <span>Точность</span>
                                         <input
                                           type="number"
                                           min={0}
@@ -2498,8 +2994,8 @@ export function App() {
                                       </label>
                                     ) : null}
                                     {field.field_type === "datetime" ? (
-                                      <label className="sub-control">
-                                        <span>Формат Даты</span>
+                                      <label className="sub-control" style={{ flex: "0 0 180px" }}>
+                                        <span>Формат даты</span>
                                         <select
                                           value={field.datetime_format ?? detectedDateFormat}
                                           onChange={(event) => updateField(index, { datetime_format: event.target.value })}
@@ -2508,10 +3004,24 @@ export function App() {
                                             <option key={format} value={format}>{format}</option>
                                           ))}
                                         </select>
-                                        <small>Автоопределено: {detectedDateFormat}</small>
                                       </label>
                                     ) : null}
+                                    </div>
+                                    {field.field_type === "datetime" ? <small>Автоопределено: {detectedDateFormat}</small> : null}
                                   </div>
+                                </td>
+                                <td>
+                                  <label className="round-checkbox">
+                                    <input
+                                      type="checkbox"
+                                      checked={Boolean(field.use_in_label)}
+                                      onChange={(event) => updateField(index, { use_in_label: event.target.checked })}
+                                    />
+                                    <span>
+                                      <i />
+                                      <em>{field.use_in_label ? "Да" : "Нет"}</em>
+                                    </span>
+                                  </label>
                                 </td>
                                 <td>
                                   <label className="round-checkbox">
@@ -2538,20 +3048,22 @@ export function App() {
                 {preprocessingSection === "encoding" ? (
                   <>
                     <div className="prep-section-head">
-                      <p>Настройте кодирование категориальных колонок. Бинарные поля здесь не показываются: им энкодинг не нужен.</p>
+                      <p>Настройте кодирование категориальных признаков.</p>
                       <button onClick={() => applyPreprocessingSection("encoding")} disabled={loading || !datasetFileId}>
                         {applyingSection === "encoding" ? "Применяем..." : "Применить"}
                       </button>
                     </div>
                     <div className="field-board">
-                      {fields
+                      {activePreprocessingFields
                         .filter((field) => field.field_type === "categorical")
                         .map((field) => {
                           const index = fields.findIndex((item) => item.key === field.key);
                           const disabled = !field.include_in_output;
-                          const column = preview?.columns.find((item) => item.normalized_name === field.key);
-                          const categories = categoriesForField(preview, field.key, column);
-                          const samples = categories.slice(0, 6);
+                          const column = encodingPreview?.columns.find((item) => item.normalized_name === field.key);
+                          const categoryCounts = rawCategoryCountsForField(encodingPreview, field.key, column);
+                          const categories = categoryCounts.map((item) => item.label);
+                          const recommendedOrdinalMap = mergeOrdinalMap(categories, field.ordinal_map);
+                          const samples = categoryCounts.slice(0, 10);
                           return (
                             <article className="field-card" key={`encoding-${field.key}`}>
                               <div className="field-card-head">
@@ -2563,62 +3075,48 @@ export function App() {
                               {samples.length ? (
                                 <div className="category-values">
                                   {samples.map((sample) => (
-                                    <span key={`${field.key}-${sample}`}>{sample}</span>
+                                    <span key={`${field.key}-${sample.label}`}>
+                                      {sample.label}
+                                      {" "}
+                                      <strong>{sample.value}</strong>
+                                    </span>
                                   ))}
                                 </div>
                               ) : null}
-                              <div className="control-grid">
-                                <label>
-                                  <LabelWithTip
-                                    label="Энкодинг"
-                                    tip="Метод кодирования категориальных признаков в числовое представление для последующего расчета метрик и ранжирования."
-                                  />
-                                  <select
-                                    value={field.encoding}
-                                    disabled={disabled}
-                                    onChange={(event) => updateFieldEncoding(index, event.target.value as FieldConfig["encoding"])}
-                                  >
-                                    <option value="none">{methodLabel("none")}</option>
-                                    <option value="one_hot">{methodLabel("one_hot")}</option>
-                                    <option value="ordinal">{methodLabel("ordinal")}</option>
-                                  </select>
-                                </label>
-                                {field.encoding === "ordinal" ? (
-                                  <label className="wide-control">
-                                    <LabelWithTip
-                                      label="Ручная шкала категорий"
-                                      tip="Задайте числовые значения вручную для каждой категории. Эти значения будут использованы при ordinal encoding."
-                                    />
-                                    <div className="manual-map-grid">
-                                      {categories.map((category) => (
-                                        <div key={`${field.key}-${category}`} className="manual-map-row">
-                                          <span>{category}</span>
-                                          <input
-                                            type="number"
-                                            step="0.01"
-                                            value={String(field.ordinal_map?.[category] ?? "")}
-                                            onChange={(event) => {
-                                              const raw = event.target.value;
-                                              const currentMap = field.ordinal_map ?? {};
-                                              const nextMap = { ...currentMap };
-                                              if (raw === "") {
-                                                delete nextMap[category];
-                                              } else {
-                                                nextMap[category] = Number(raw);
-                                              }
-                                              updateField(index, { ordinal_map: nextMap });
-                                            }}
-                                          />
-                                        </div>
-                                      ))}
+                              <div className="encoding-grid">
+                                <LabelWithTip
+                                  label="Ручная шкала категорий"
+                                  tip="Система задает стартовые значения автоматически по формуле (позиция категории в списке / число категорий). Категории идут в текущем порядке списка, а вы можете вручную скорректировать любое значение."
+                                />
+                                <div className="manual-map-grid">
+                                  {categories.map((category) => (
+                                    <div key={`${field.key}-${category}`} className="manual-map-row">
+                                      <span>{category}</span>
+                                      <input
+                                        type="number"
+                                        step="0.01"
+                                        disabled={disabled}
+                                        value={String(field.ordinal_map?.[category] ?? recommendedOrdinalMap[category] ?? "")}
+                                        onChange={(event) => {
+                                          const raw = event.target.value;
+                                          const currentMap = field.ordinal_map ?? recommendedOrdinalMap;
+                                          const nextMap = { ...currentMap };
+                                          if (raw === "") {
+                                            nextMap[category] = recommendedOrdinalMap[category] ?? 0;
+                                          } else {
+                                            nextMap[category] = Number(raw);
+                                          }
+                                          updateField(index, { encoding: "ordinal", ordinal_map: nextMap });
+                                        }}
+                                      />
                                     </div>
-                                  </label>
-                                ) : null}
+                                  ))}
+                                </div>
                               </div>
                             </article>
                           );
                         })}
-                      {!fields.some((field) => field.field_type === "categorical") ? (
+                      {!activePreprocessingFields.some((field) => field.field_type === "categorical") ? (
                         <p className="muted-note">Категориальные колонки не найдены. Назначьте тип в разделе «Типы данных».</p>
                       ) : null}
                     </div>
@@ -2628,14 +3126,14 @@ export function App() {
                 {preprocessingSection === "scaling" ? (
                   <>
                     <div className="prep-section-head">
-                      <p>Настройте масштабирование числовых признаков. Неактивные колонки остаются в датасете, но не участвуют в дальнейшем анализе.</p>
+                      <p>Выберите способ масштабирования для числовых признаков.</p>
                       <button onClick={() => applyPreprocessingSection("scaling")} disabled={loading || !datasetFileId}>
                         {applyingSection === "scaling" ? "Применяем..." : "Применить"}
                       </button>
                     </div>
                     <div className="field-board">
                       {fields
-                        .filter((field) => isNumericFieldType(field.field_type))
+                        .filter((field) => field.include_in_output && isNumericFieldType(field.field_type))
                         .map((field) => {
                           const index = fields.findIndex((item) => item.key === field.key);
                           const disabled = !field.include_in_output;
@@ -2668,7 +3166,7 @@ export function App() {
                             </article>
                           );
                         })}
-                      {!fields.some((field) => isNumericFieldType(field.field_type)) ? (
+                      {!activePreprocessingFields.some((field) => isNumericFieldType(field.field_type)) ? (
                         <p className="muted-note">Числовые колонки не найдены. Назначьте тип в разделе «Типы данных».</p>
                       ) : null}
                     </div>
@@ -2678,7 +3176,7 @@ export function App() {
                 {preprocessingSection === "missing" ? (
                   <>
                     <div className="prep-section-head">
-                      <p>Выберите стратегии обработки пропусков и нажмите «Применить» для обновления данных.</p>
+                      <p>Задайте стратегию обработки пропусков для нужных полей.</p>
                       <button onClick={() => applyPreprocessingSection("missing")} disabled={loading || !datasetFileId}>
                         {applyingSection === "missing" ? "Применяем..." : "Применить"}
                       </button>
@@ -2688,7 +3186,7 @@ export function App() {
                         <thead>
                           <tr>
                             <th>ID</th>
-                            {preview?.columns.map((column) => (
+                            {visiblePreviewColumns.map((column) => (
                               <th key={`missing-head-${column.normalized_name}`}>{column.normalized_name}</th>
                             ))}
                           </tr>
@@ -2698,7 +3196,7 @@ export function App() {
                             return (
                               <tr key={row.id}>
                                 <td>{row.id}</td>
-                                {preview?.columns.map((column) => {
+                                {visiblePreviewColumns.map((column) => {
                                   const value = row.values[column.normalized_name];
                                   const isMissing = value === null || value === undefined || value === "";
                                   return (
@@ -2717,7 +3215,11 @@ export function App() {
 
                     <div className="field-board">
                       {fields
-                        .filter((field) => (preview?.columns.find((column) => column.normalized_name === field.key)?.missing_count ?? 0) > 0)
+                        .filter(
+                          (field) =>
+                            field.include_in_output
+                            && (preview?.columns.find((column) => column.normalized_name === field.key)?.missing_count ?? 0) > 0,
+                        )
                         .map((field) => {
                           const index = fields.findIndex((item) => item.key === field.key);
                           const missingCount = preview?.columns.find((column) => column.normalized_name === field.key)?.missing_count ?? 0;
@@ -2791,8 +3293,8 @@ export function App() {
                 {preprocessingSection === "outliers" ? (
                   <>
                     <div className="prep-section-head">
-                      <p>Настройте обработку выбросов и примените, чтобы пересчитать графики и итоговый профиль.</p>
-                      <button className="ghost-button" onClick={() => applyPreprocessingSection("outliers")} disabled={loading || !datasetFileId}>
+                      <p>Настройте правила обработки выбросов для числовых признаков.</p>
+                      <button onClick={() => applyPreprocessingSection("outliers")} disabled={loading || !datasetFileId}>
                         {applyingSection === "outliers" ? "Применяем..." : "Применить"}
                       </button>
                     </div>
@@ -2894,7 +3396,7 @@ export function App() {
                 ) : null}
               </>
             ) : (
-              <div className="empty-state">Сначала загрузите файл на этапе «Данные».</div>
+              <div className="empty-state">Сначала загрузите файл.</div>
             )}
           </section>
         ) : null}
@@ -2905,7 +3407,6 @@ export function App() {
               <div>
                 <span className="section-kicker">Этап 3</span>
                 <h2>Режим и веса критериев</h2>
-                <p>Сверху оставлены только ключевые настройки: режим, целевой объект и веса критериев.</p>
               </div>
               {criteria.length > 0 ? (
                 <div className="criteria-actions">
@@ -2938,22 +3439,39 @@ export function App() {
                 </select>
               </label>
               {analysisMode === "analog_search" ? (
-                <label>
-                  Целевой объект
-                  <select value={targetRowId} onChange={(event) => setTargetRowId(event.target.value)}>
-                    {(preview?.normalized_dataset?.rows ?? []).map((row) => {
-                      const label = String(row.values.name ?? row.values.title ?? row.values.object_name ?? `Объект ${row.id}`);
-                      return <option key={row.id} value={row.id}>{row.id} · {label}</option>;
-                    })}
-                  </select>
-                </label>
+                <>
+                  <label>
+                    Целевой объект
+                    <select value={targetRowId} onChange={(event) => setTargetRowId(event.target.value)}>
+                      {(preview?.normalized_dataset?.rows ?? []).map((row) => {
+                        const label = objectLabelMap.get(row.id) || `Объект ${row.id}`;
+                        return <option key={row.id} value={row.id}>{row.id} · {label}</option>;
+                      })}
+                    </select>
+                  </label>
+                  {geoSearchAvailable ? (
+                    <label>
+                      Радиус, км
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.1"
+                        value={geoRadiusKm ?? ""}
+                        onChange={(event) => setGeoRadiusKm(event.target.value === "" ? null : Math.max(0, Number(event.target.value)))}
+                        placeholder="Без ограничения"
+                      />
+                    </label>
+                  ) : null}
+                </>
               ) : (
-                <div className="target-explain">В режиме общего рейтинга целевой объект не требуется.</div>
+                <div className="target-explain">Целевой объект не требуется.</div>
               )}
               <div className="target-explain">
                 {analysisMode === "analog_search"
-                  ? "Система сравнит все объекты с выбранным целевым объектом и покажет ближайшие аналоги."
-                  : "Система построит общий рейтинг объектов по текущим критериям."}
+                  ? geoSearchAvailable
+                    ? "Выберите целевой объект и при необходимости ограничьте радиус поиска."
+                    : "Выберите целевой объект и настройте критерии."
+                  : "Настройте критерии и веса для построения рейтинга."}
               </div>
             </div>
             {weightNotes.length > 0 ? (
@@ -3019,7 +3537,7 @@ export function App() {
                   <h2>{analysisMode === "analog_search" ? "Найденные аналоги" : "Результаты расчета"}</h2>
                   <p>
                     {analysisMode === "analog_search"
-                      ? "Список объектов, наиболее близких к выбранному целевому объекту по заданным критериям."
+                      ? "Ближайшие объекты к выбранному целевому объекту."
                       : "Итоговый рейтинг, объяснение результата и экспорт отчета сравнения."}
                   </p>
                 </div>
@@ -3083,6 +3601,14 @@ export function App() {
                       onSelect={setSelectedResultId}
                       currentPage={resultsPage}
                       onPageChange={changeResultsPage}
+                    />
+                    <RadarComparisonChart
+                      item={selectedResult}
+                      baseline={result.ranking[0]}
+                    />
+                    <ContributionWaterfallChart
+                      item={selectedResult}
+                      mode={analysisMode}
                     />
                   </div>
                   <ObjectDetailsPanel item={selectedResult} mode={analysisMode} />

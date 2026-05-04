@@ -27,7 +27,7 @@ class ImportedPreview(BaseModel):
     normalized_dataset: dict[str, list[PipelineRow]]
 
 
-FieldType = Literal["numeric", "integer", "float", "categorical", "binary", "text", "datetime"]
+FieldType = Literal["numeric", "integer", "float", "geo_latitude", "geo_longitude", "categorical", "binary", "text", "datetime"]
 MissingStrategy = Literal["none", "drop_row", "mean", "median", "mode", "constant"]
 OutlierMethod = Literal["none", "iqr_remove", "iqr_clip", "zscore_remove", "zscore_clip"]
 NormalizationMethod = Literal["none", "minmax", "zscore", "robust", "log_minmax"]
@@ -41,6 +41,7 @@ class FieldConfig(BaseModel):
     field_type: FieldType
     required: bool = False
     include_in_output: bool = True
+    use_in_label: bool = False
     missing_strategy: MissingStrategy = "none"
     missing_constant: Any | None = None
     outlier_method: OutlierMethod = "none"
@@ -83,6 +84,7 @@ class PipelineConfig(BaseModel):
     fields: list[FieldConfig]
     criteria: list[CriterionConfig]
     target_row_id: str | None = None
+    geo_radius_km: float | None = Field(default=None, ge=0)
     analysis_mode: Literal["rating", "analog_search"] = "rating"
     top_n: int = 10
     filter_criteria: AnalysisFilters | None = None

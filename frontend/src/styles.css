@@ -714,6 +714,19 @@ p {
   max-height: 560px;
 }
 
+.table-wrap table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: rgba(248, 250, 252, 0.96);
+  backdrop-filter: blur(10px);
+  box-shadow: inset 0 -1px 0 rgba(23, 32, 44, 0.08);
+}
+
+.dataset-table table thead th {
+  background: rgba(244, 247, 251, 0.98);
+}
+
 .schema-panel {
   margin-top: 0;
 }
@@ -726,6 +739,27 @@ p {
 table {
   width: 100%;
   border-collapse: collapse;
+}
+
+.types-table {
+  table-layout: fixed;
+}
+
+.types-table th:nth-child(1),
+.types-table td:nth-child(1) {
+  width: 150px;
+}
+
+.types-table th:nth-child(2),
+.types-table td:nth-child(2) {
+  width: min(34vw, 460px);
+}
+
+.types-table-samples {
+  max-width: 460px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 th,
@@ -1299,6 +1333,35 @@ th {
   gap: 12px;
 }
 
+.encoding-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.manual-map-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 14px;
+}
+
+.manual-map-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 92px;
+  align-items: center;
+  gap: 10px;
+}
+
+.manual-map-row span {
+  min-width: 0;
+  color: var(--ink);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.manual-map-row input {
+  min-width: 0;
+}
+
 .control-grid label,
 .criterion-card label {
   display: grid;
@@ -1718,7 +1781,7 @@ th {
 
 .analytics-grid {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
   margin-bottom: 18px;
 }
@@ -1731,6 +1794,10 @@ th {
   background:
     radial-gradient(circle at 8% 0%, rgba(37, 99, 235, 0.12), transparent 32%),
     rgba(255, 255, 255, 0.76);
+}
+
+.analytics-card.wide-chart {
+  grid-column: 1 / -1;
 }
 
 .chart-head {
@@ -1759,6 +1826,35 @@ th {
   color: var(--muted);
   line-height: 1.4;
   text-align: right;
+}
+
+.radar-chart {
+  display: block;
+  width: min(100%, 360px);
+  height: auto;
+  margin: 4px auto 0;
+}
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 14px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.chart-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chart-legend i {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  display: inline-block;
 }
 
 .result-bars {
@@ -1856,6 +1952,79 @@ th {
   color: var(--muted);
   font-size: 13px;
   white-space: nowrap;
+}
+
+.waterfall-list {
+  display: grid;
+  gap: 12px;
+}
+
+.waterfall-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 0.9fr) minmax(220px, 1.6fr) 84px;
+  align-items: center;
+  gap: 14px;
+}
+
+.waterfall-meta {
+  display: grid;
+  gap: 4px;
+}
+
+.waterfall-meta strong {
+  font-size: 14px;
+  line-height: 1.25;
+}
+
+.waterfall-meta span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.waterfall-track {
+  position: relative;
+  height: 18px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(148, 163, 184, 0.12), rgba(148, 163, 184, 0.04));
+}
+
+.waterfall-zero {
+  position: absolute;
+  top: 1px;
+  bottom: 1px;
+  width: 2px;
+  margin-left: -1px;
+  background: rgba(51, 65, 85, 0.24);
+  border-radius: 999px;
+}
+
+.waterfall-bar {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  border-radius: 999px;
+}
+
+.waterfall-bar.positive {
+  background: linear-gradient(90deg, #2563eb, #14b8a6);
+}
+
+.waterfall-bar.negative {
+  background: linear-gradient(90deg, #f97316, #ef4444);
+}
+
+.waterfall-value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.waterfall-value.positive {
+  color: #0f766e;
+}
+
+.waterfall-value.negative {
+  color: #dc2626;
 }
 
 .chart-pagination-controls {
@@ -2529,6 +2698,7 @@ th {
 
   .stage-nav,
   .control-grid,
+  .manual-map-grid,
   .slider-block,
   .target-panel,
   .project-panel,

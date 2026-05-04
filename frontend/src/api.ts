@@ -12,6 +12,7 @@ import type {
   PipelineResult,
   PreviewResponse,
   ProjectItem,
+  RawObjectsResponse,
   SystemDashboard,
 } from "./types";
 
@@ -131,6 +132,28 @@ export async function fetchStoredProfile(
 
   if (!response.ok) {
     throw new Error(await readError(response, "Не удалось загрузить расширенный профиль датасета"));
+  }
+
+  return response.json();
+}
+
+export async function fetchRawObjects(
+  datasetFileId: number,
+  objectIds: string[],
+  filename?: string,
+): Promise<RawObjectsResponse> {
+  const response = await fetch(`${ORCHESTRATOR_URL}/pipeline/raw-objects`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      dataset_file_id: datasetFileId,
+      filename: filename || null,
+      object_ids: objectIds,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(await readError(response, "Не удалось загрузить исходные значения объекта."));
   }
 
   return response.json();

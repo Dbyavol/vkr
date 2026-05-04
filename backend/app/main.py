@@ -29,6 +29,8 @@ from app.schemas.pipeline import (
     PipelinePreprocessRefreshRequest,
     PipelinePreprocessRefreshResponse,
     PipelineProfileStoredResponse,
+    PipelineRawObjectsRequest,
+    PipelineRawObjectsResponse,
     PipelineRequest,
     PipelineRunResponse,
     PipelineStoredProfileRequest,
@@ -36,6 +38,7 @@ from app.schemas.pipeline import (
     ReportRequest,
 )
 from app.services.pipeline_engine import (
+    fetch_raw_objects_from_storage,
     fetch_stored_dataset_profile,
     fetch_system_dashboard,
     refresh_preprocessing_from_storage,
@@ -298,6 +301,31 @@ async def pipeline_profile_stored(payload: PipelineStoredProfileRequest) -> Pipe
             exc_info=True,
         )
         raise HTTPException(status_code=400, detail={"code": "PIPELINE_PROFILE_ERROR", "message": str(exc)}) from exc
+
+
+@app.post(f"{settings.api_prefix}/pipeline/raw-objects", response_model=PipelineRawObjectsResponse)
+async def pipeline_raw_objects(payload: PipelineRawObjectsRequest) -> PipelineRawObjectsResponse:
+    try:
+        data = await fetch_raw_objects_from_storage(
+            dataset_file_id=payload.dataset_file_id,
+            filename=payload.filename,
+            object_ids=payload.object_ids,
+        )
+        log_audit_event(
+            "pipeline_raw_objects",
+            dataset_file_id=payload.dataset_file_id,
+            filename=payload.filename or "dataset",
+            object_ids=payload.object_ids,
+        )
+        return PipelineRawObjectsResponse.model_validate(data)
+    except ValueError as exc:
+        request_logger.error(
+            "pipeline_raw_objects_failed dataset_file_id=%r filename=%r",
+            payload.dataset_file_id,
+            payload.filename or "dataset",
+            exc_info=True,
+        )
+        raise HTTPException(status_code=400, detail={"code": "PIPELINE_RAW_OBJECTS_ERROR", "message": str(exc)}) from exc
 
 
 @app.post(f"{settings.api_prefix}/pipeline/run", response_model=PipelineRunResponse)

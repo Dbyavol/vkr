@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
+import { TargetObjectPreviewCard } from "./components/TargetObjectPreviewCard";
 import {
   bindReportToHistory,
   createProject,
   downloadDocxReport,
+  fetchRawObjects,
   fetchStoredProfile,
   fetchAdminStats,
   fetchAdminUsers,
@@ -32,6 +34,7 @@ import type {
   PreviewResponse,
   DatasetQualityReport,
   ProjectItem,
+  RawObjectsResponse,
   RankingStabilityScenario,
   SystemDashboard,
 } from "./types";
@@ -203,6 +206,10 @@ function buildObjectLabel(
     .map((value) => String(value).trim());
   if (values.length) return values.join(" · ");
   return String(row.values.name ?? row.values.title ?? row.values.object_name ?? `Объект ${row.id}`);
+}
+
+function humanizeFieldKey(key: string) {
+  return key.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function findGeoFieldKey(fields: FieldConfig[], role: "geo_latitude" | "geo_longitude") {
@@ -1381,9 +1388,11 @@ function ContributionWaterfallChart({
 function ObjectDetailsPanel({
   item,
   mode,
+  rawValues,
 }: {
   item?: RankedItem;
   mode: AnalysisMode;
+  rawValues?: Record<string, unknown> | null;
 }) {
   if (!item) {
     return <p className="muted-note">Выберите объект на Bar Chart, чтобы увидеть подробности.</p>;
@@ -1435,7 +1444,9 @@ function ObjectDetailsPanel({
           {item.contributions.map((contribution) => (
             <div className="object-contributions-row" key={contribution.key}>
               <strong>{contribution.name}</strong>
-              <span title={objectValueLabel(contribution.raw_value)}>{objectValueLabel(contribution.raw_value)}</span>
+              <span title={objectValueLabel(rawValues?.[contribution.key] ?? contribution.raw_value)}>
+                {objectValueLabel(rawValues?.[contribution.key] ?? contribution.raw_value)}
+              </span>
               <span>{compactNumber(contribution.normalized_value)}</span>
               <span>{contribution.contribution.toFixed(3)}</span>
             </div>
@@ -1495,6 +1506,7 @@ export function App() {
   const [geoRadiusKm, setGeoRadiusKm] = useState<number | null>(savedWorkflow.geoRadiusKm ?? null);
   const [result, setResult] = useState<PipelineResult | null>(() => normalizePipelineResult(savedWorkflow.result ?? null));
   const [selectedResultId, setSelectedResultId] = useState(savedWorkflow.result?.ranking?.[0]?.object_id ?? "");
+  const [rawResultValuesById, setRawResultValuesById] = useState<Record<string, Record<string, unknown>>>({});
   const [resultsPage, setResultsPage] = useState(1);
   const [lastHistoryId, setLastHistoryId] = useState<number | null>(savedWorkflow.lastHistoryId ?? null);
   const [preprocessingSection, setPreprocessingSection] = useState<PrepSectionId>(savedWorkflow.preprocessingSection === "selection" ? "types" : savedWorkflow.preprocessingSection ?? "types");
@@ -1563,6 +1575,39 @@ export function App() {
   const geoLatitudeKey = useMemo(() => findGeoFieldKey(fields, "geo_latitude"), [fields]);
   const geoLongitudeKey = useMemo(() => findGeoFieldKey(fields, "geo_longitude"), [fields]);
   const geoSearchAvailable = Boolean(geoLatitudeKey && geoLongitudeKey);
+  const selectedTargetRow = useMemo(
+    () => (preview?.normalized_dataset?.rows ?? []).find((row) => row.id === targetRowId) ?? null,
+    [preview, targetRowId],
+  );
+  const selectedTargetPreviewItems = useMemo(() => {
+    if (!selectedTargetRow) return [];
+
+    const selectedKeys = new Set<string>();
+    const orderedKeys: string[] = [];
+    const pushKey = (key: string | null | undefined) => {
+      if (!key || selectedKeys.has(key)) return;
+      const value = selectedTargetRow.values[key];
+      if (value === null || value === undefined || String(value).trim() === "") return;
+      selectedKeys.add(key);
+      orderedKeys.push(key);
+    };
+
+    fields
+      .filter((field) => field.use_in_label && field.include_in_output)
+      .forEach((field) => pushKey(field.key));
+    criteria.forEach((criterion) => pushKey(criterion.key));
+    pushKey(geoLatitudeKey);
+    pushKey(geoLongitudeKey);
+    fields
+      .filter((field) => field.include_in_output)
+      .forEach((field) => pushKey(field.key));
+
+    return orderedKeys.slice(0, 8).map((key) => ({
+      key,
+      label: humanizeFieldKey(key),
+      value: objectValueLabel(selectedTargetRow.values[key]),
+    }));
+  }, [selectedTargetRow, fields, criteria, geoLatitudeKey, geoLongitudeKey]);
   const fullDatasetOutlierTotal = useMemo(
     () => profile.filter((field) => ["numeric", "integer", "float"].includes(field.inferred_type)).reduce((sum, field) => sum + field.outlier_count_iqr, 0),
     [profile],
@@ -1720,6 +1765,7 @@ export function App() {
     setGeoRadiusKm(null);
     setResult(null);
     setSelectedResultId("");
+    setRawResultValuesById({});
     setResultsPage(1);
     setLastHistoryId(null);
     setActiveProjectId(null);
@@ -1801,6 +1847,32 @@ export function App() {
       setSelectedResultId(result.ranking[0].object_id);
     }
   }, [result, selectedResultId]);
+
+  useEffect(() => {
+    if (!datasetFileId || !selectedResult?.object_id) return;
+    if (rawResultValuesById[selectedResult.object_id]) return;
+
+    let cancelled = false;
+
+    void fetchRawObjects(datasetFileId, [selectedResult.object_id], sourceFilename || preview?.filename || undefined)
+      .then((response: RawObjectsResponse) => {
+        const objectValues = response.objects[selectedResult.object_id];
+        if (cancelled || !objectValues) return;
+        setRawResultValuesById((current) => ({
+          ...current,
+          [selectedResult.object_id]: objectValues,
+        }));
+      })
+      .catch((rawError) => {
+        if (!cancelled) {
+          console.error(rawError);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [datasetFileId, selectedResult, sourceFilename, preview, rawResultValuesById]);
 
   useEffect(() => {
     const totalPages = Math.max(1, Math.ceil((result?.ranking.length ?? 0) / 8));
@@ -2049,6 +2121,7 @@ export function App() {
     setError(null);
     setResult(null);
     setSelectedResultId("");
+    setRawResultValuesById({});
     if (!projectId || !user) {
       setFile(null);
       setDatasetFileId(null);
@@ -2210,6 +2283,7 @@ export function App() {
     setError(null);
     setResult(null);
     setSelectedResultId("");
+    setRawResultValuesById({});
     try {
       const response = await profileFile(file);
       setDatasetFileId(response.dataset_file_id ?? null);
@@ -2269,6 +2343,7 @@ export function App() {
         throw new Error("Неверный формат ответа от сервера: отсутствует поле ranking");
       }
       setResult(normalizePipelineResult(response));
+      setRawResultValuesById({});
       // Guard access to first item
       setSelectedResultId(response.ranking.length > 0 && response.ranking[0] && response.ranking[0].object_id ? response.ranking[0].object_id : "");
       setResultsPage(1);
@@ -3462,6 +3537,13 @@ export function App() {
                       />
                     </label>
                   ) : null}
+                  {selectedTargetRow ? (
+                    <TargetObjectPreviewCard
+                      objectId={selectedTargetRow.id}
+                      title={objectLabelMap.get(selectedTargetRow.id) || `Объект ${selectedTargetRow.id}`}
+                      items={selectedTargetPreviewItems}
+                    />
+                  ) : null}
                 </>
               ) : (
                 <div className="target-explain">Целевой объект не требуется.</div>
@@ -3611,7 +3693,11 @@ export function App() {
                       mode={analysisMode}
                     />
                   </div>
-                  <ObjectDetailsPanel item={selectedResult} mode={analysisMode} />
+                  <ObjectDetailsPanel
+                    item={selectedResult}
+                    mode={analysisMode}
+                    rawValues={selectedResult ? rawResultValuesById[selectedResult.object_id] ?? null : null}
+                  />
                 </>
               ) : (
                 <div className="empty-state">

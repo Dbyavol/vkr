@@ -313,6 +313,38 @@ async def fetch_stored_dataset_profile(
     return {"dataset_file_id": dataset_file_id, "preview": lightweight_preview(raw_preview), "profile": profile}
 
 
+async def fetch_raw_objects_from_storage(
+    *,
+    dataset_file_id: int,
+    filename: str | None,
+    object_ids: list[str],
+) -> dict[str, Any]:
+    started_at = start_timer()
+    metadata = await fetch_stored_file_metadata(file_id=dataset_file_id)
+    resolved_filename = filename or metadata.get("original_name") or "dataset"
+    body = await fetch_stored_file_body(file_id=dataset_file_id)
+    raw_preview = await fetch_preview(filename=resolved_filename, body=body)
+    rows = list((raw_preview.get("normalized_dataset") or {}).get("rows") or [])
+    requested_ids = {str(object_id) for object_id in object_ids}
+    objects = {
+        str(row.get("id")): dict(row.get("values") or {})
+        for row in rows
+        if str(row.get("id")) in requested_ids
+    }
+    pipeline_logger.info(
+        "fetch_raw_objects_from_storage_completed dataset_file_id=%r filename=%r requested=%r found=%r duration_ms=%.2f",
+        dataset_file_id,
+        resolved_filename,
+        len(requested_ids),
+        len(objects),
+        elapsed_ms(started_at),
+    )
+    return {
+        "dataset_file_id": dataset_file_id,
+        "objects": objects,
+    }
+
+
 async def analyze_dataset(
     *,
     rows: list[dict[str, Any]],

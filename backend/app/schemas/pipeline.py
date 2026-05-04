@@ -135,6 +135,17 @@ class PipelineStoredProfileRequest(BaseModel):
     profile_detail_level: ProfileDetailLevel = "detailed"
 
 
+class PipelineRawObjectsRequest(BaseModel):
+    filename: str | None = None
+    dataset_file_id: int
+    object_ids: list[str] = Field(default_factory=list)
+
+
+class PipelineRawObjectsResponse(BaseModel):
+    dataset_file_id: int
+    objects: dict[str, dict[str, Any]]
+
+
 class Contribution(BaseModel):
     key: str
     name: str

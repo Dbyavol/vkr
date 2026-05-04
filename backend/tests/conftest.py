@@ -73,6 +73,16 @@ def sample_csv_bytes() -> bytes:
     ).encode("utf-8")
 
 
+@pytest.fixture
+def sample_geo_csv_bytes() -> bytes:
+    return (
+        "name,price,area,lat,lon\n"
+        "Target,100,50,55.7558,37.6176\n"
+        "Near,105,49,55.7560,37.6180\n"
+        "Far,80,70,59.9343,30.3351\n"
+    ).encode("utf-8")
+
+
 @pytest.fixture(scope="session", autouse=True)
 def cleanup_session_artifacts():
     yield

@@ -1,0 +1,218 @@
+{
+  "mode": "internal",
+  "rows_values": [
+    1000,
+    5000
+  ],
+  "concurrency_values": [
+    1,
+    2
+  ],
+  "iterations": 2,
+  "cases": [
+    {
+      "mode": "internal",
+      "rows": 1000,
+      "iterations": 2,
+      "concurrency": 1,
+      "summary": {
+        "profile": {
+          "avg_ms": 27.09,
+          "min_ms": 23.43,
+          "max_ms": 30.76,
+          "p95_ms": 30.76,
+          "p99_ms": 30.76,
+          "errors": 0,
+          "error_rate_pct": 0.0
+        },
+        "pipeline": {
+          "avg_ms": 126.19,
+          "min_ms": 111.16,
+          "max_ms": 141.23,
+          "p95_ms": 141.23,
+          "p99_ms": 141.23,
+          "errors": 0,
+          "error_rate_pct": 0.0
+        },
+        "total": {
+          "avg_ms": 153.29,
+          "min_ms": 141.92,
+          "max_ms": 164.66,
+          "p95_ms": 164.66,
+          "p99_ms": 164.66,
+          "errors": 0,
+          "error_rate_pct": 0.0
+        }
+      },
+      "runs": [
+        {
+          "ok": true,
+          "profile_ms": 30.76,
+          "pipeline_ms": 111.16,
+          "total_ms": 141.92,
+          "ranking_count": 10
+        },
+        {
+          "ok": true,
+          "profile_ms": 23.43,
+          "pipeline_ms": 141.23,
+          "total_ms": 164.66,
+          "ranking_count": 10
+        }
+      ]
+    },
+    {
+      "mode": "internal",
+      "rows": 1000,
+      "iterations": 2,
+      "concurrency": 2,
+      "summary": {
+        "profile": {
+          "avg_ms": 18.27,
+          "min_ms": 17.97,
+          "max_ms": 18.56,
+          "p95_ms": 18.56,
+          "p99_ms": 18.56,
+          "errors": 0,
+          "error_rate_pct": 0.0
+        },
+        "pipeline": {
+          "avg_ms": 115.63,
+          "min_ms": 99.36,
+          "max_ms": 131.9,
+          "p95_ms": 131.9,
+          "p99_ms": 131.9,
+          "errors": 0,
+          "error_rate_pct": 0.0
+        },
+        "total": {
+          "avg_ms": 133.9,
+          "min_ms": 117.92,
+          "max_ms": 149.87,
+          "p95_ms": 149.87,
+          "p99_ms": 149.87,
+          "errors": 0,
+          "error_rate_pct": 0.0
+        }
+      },
+      "runs": [
+        {
+          "ok": true,
+          "profile_ms": 18.56,
+          "pipeline_ms": 99.36,
+          "total_ms": 117.92,
+          "ranking_count": 10
+        },
+        {
+          "ok": true,
+          "profile_ms": 17.97,
+          "pipeline_ms": 131.9,
+          "total_ms": 149.87,
+          "ranking_count": 10
+        }
+      ]
+    },
+    {
+      "mode": "internal",
+      "rows": 5000,
+      "iterations": 2,
+      "concurrency": 1,
+      "summary": {
+        "profile": {
+          "avg_ms": 76.66,
+          "min_ms": 55.78,
+          "max_ms": 97.54,
+          "p95_ms": 97.54,
+          "p99_ms": 97.54,
+          "errors": 0,
+          "error_rate_pct": 0.0
+        },
+        "pipeline": {
+          "avg_ms": 565.18,
+          "min_ms": 536.25,
+          "max_ms": 594.12,
+          "p95_ms": 594.12,
+          "p99_ms": 594.12,
+          "errors": 0,
+          "error_rate_pct": 0.0
+        },
+        "total": {
+          "avg_ms": 641.85,
+          "min_ms": 592.04,
+          "max_ms": 691.66,
+          "p95_ms": 691.66,
+          "p99_ms": 691.66,
+          "errors": 0,
+          "error_rate_pct": 0.0
+        }
+      },
+      "runs": [
+        {
+          "ok": true,
+          "profile_ms": 55.78,
+          "pipeline_ms": 536.25,
+          "total_ms": 592.04,
+          "ranking_count": 10
+        },
+        {
+          "ok": true,
+          "profile_ms": 97.54,
+          "pipeline_ms": 594.12,
+          "total_ms": 691.66,
+          "ranking_count": 10
+        }
+      ]
+    },
+    {
+      "mode": "internal",
+      "rows": 5000,
+      "iterations": 2,
+      "concurrency": 2,
+      "summary": {
+        "profile": {
+          "avg_ms": 59.21,
+          "min_ms": 55.25,
+          "max_ms": 63.17,
+          "p95_ms": 63.17,
+          "p99_ms": 63.17,
+          "errors": 0,
+          "error_rate_pct": 0.0
+        },
+        "pipeline": {
+          "avg_ms": 541.55,
+          "min_ms": 515.52,
+          "max_ms": 567.57,
+          "p95_ms": 567.57,
+          "p99_ms": 567.57,
+          "errors": 0,
+          "error_rate_pct": 0.0
+        },
+        "total": {
+          "avg_ms": 600.75,
+          "min_ms": 570.76,
+          "max_ms": 630.74,
+          "p95_ms": 630.74,
+          "p99_ms": 630.74,
+          "errors": 0,
+          "error_rate_pct": 0.0
+        }
+      },
+      "runs": [
+        {
+          "ok": true,
+          "profile_ms": 63.17,
+          "pipeline_ms": 567.57,
+          "total_ms": 630.74,
+          "ranking_count": 10
+        },
+        {
+          "ok": true,
+          "profile_ms": 55.25,
+          "pipeline_ms": 515.52,
+          "total_ms": 570.76,
+          "ranking_count": 10
+        }
+      ]
+    }
+  ]
+}

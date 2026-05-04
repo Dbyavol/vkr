@@ -104,6 +104,11 @@ export type PipelineProfileResponse = {
   profile: DatasetProfileResponse;
 };
 
+export type RawObjectsResponse = {
+  dataset_file_id: number;
+  objects: Record<string, Record<string, unknown>>;
+};
+
 export type PreprocessingRefreshResponse = {
   preview: PreviewResponse;
   profile: DatasetProfileResponse;

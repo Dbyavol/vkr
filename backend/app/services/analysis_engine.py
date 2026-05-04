@@ -130,11 +130,11 @@ def _build_objects_frame(objects: list[Any], criteria: list[CriterionConfig]) ->
     return frame, title_by_id
 
 
-def _normalize_criteria_frame(
+def _prepare_criteria_frame(
     frame: pd.DataFrame,
     criteria: list[CriterionConfig],
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    normalized = pd.DataFrame(index=frame.index)
+    prepared = pd.DataFrame(index=frame.index)
     notes = pd.DataFrame(index=frame.index)
 
     for criterion in criteria:
@@ -143,55 +143,57 @@ def _normalize_criteria_frame(
 
         if criterion.type == "numeric":
             numeric = _to_numeric_series(raw)
-            valid = numeric.dropna()
+            
             result = pd.Series(0.0, index=frame.index, dtype=float)
             note_series = pd.Series([None] * len(frame.index), index=frame.index, dtype="object")
             missing_mask = numeric.isna()
             if missing_mask.any():
                 note_series.loc[missing_mask] = "Значение отсутствует или не является числом"
+            valid = numeric.dropna()
             if valid.empty:
                 note_series.loc[:] = "В датасете нет числовых значений по этому критерию"
             else:
-                min_value = float(valid.min())
-                max_value = float(valid.max())
                 valid_mask = numeric.notna()
-                if min_value == max_value:
-                    result.loc[valid_mask] = 1.0
+                result.loc[valid_mask] = numeric.loc[valid_mask]
+                if criterion.direction == "minimize":
+                    result.loc[valid_mask] = -result.loc[valid_mask]
+                if valid.nunique() <= 1:
                     note_series.loc[valid_mask] = "У всех объектов одинаковое значение по этому критерию"
-                else:
-                    if criterion.direction == "minimize":
-                        result.loc[valid_mask] = (max_value - numeric.loc[valid_mask]) / (max_value - min_value)
-                    else:
-                        result.loc[valid_mask] = (numeric.loc[valid_mask] - min_value) / (max_value - min_value)
-            normalized[key] = result.fillna(0.0).round(4)
+            prepared[key] = result.fillna(0.0).round(6)
             notes[key] = note_series
             continue
 
         raw_as_string = raw.astype("string")
         if criterion.direction == "target":
-            normalized[key] = raw.eq(criterion.target_value).astype(float).round(4)
+            prepared[key] = raw.eq(criterion.target_value).astype(float).round(6)
             notes[key] = pd.Series([None] * len(frame.index), index=frame.index, dtype="object")
             continue
 
         if criterion.scale_map:
             mapped = raw_as_string.map(lambda value: criterion.scale_map.get(str(value), 0.0) if pd.notna(value) else 0.0)
-            normalized[key] = pd.to_numeric(mapped, errors="coerce").fillna(0.0).round(4)
+            result = pd.to_numeric(mapped, errors="coerce").fillna(0.0)
+            if criterion.direction == "minimize":
+                result = -result
+            prepared[key] = result.round(6)
             notes[key] = pd.Series([None] * len(frame.index), index=frame.index, dtype="object")
             continue
 
         if pd.api.types.is_bool_dtype(raw):
-            normalized[key] = raw.astype(float).fillna(0.0).round(4)
+            result = raw.astype(float).fillna(0.0)
+            if criterion.direction == "minimize":
+                result = -result
+            prepared[key] = result.round(6)
             notes[key] = pd.Series([None] * len(frame.index), index=frame.index, dtype="object")
             continue
 
-        normalized[key] = pd.Series(0.0, index=frame.index, dtype=float)
+        prepared[key] = pd.Series(0.0, index=frame.index, dtype=float)
         notes[key] = pd.Series(
             ["Для категориального критерия не задана шкала"] * len(frame.index),
             index=frame.index,
             dtype="object",
         )
 
-    return normalized, notes
+    return prepared, notes
 
 
 def _criterion_sensitivity(
@@ -232,25 +234,24 @@ def _criterion_sensitivity(
 
 
 def _score_frame(
-    normalized_df: pd.DataFrame,
+    prepared_df: pd.DataFrame,
     weights: dict[str, float],
     mode: str,
     target_object_id: str | None,
 ) -> tuple[pd.Series, pd.Series | None]:
     weight_series = pd.Series(weights, dtype=float)
-    contributions_df = normalized_df.mul(weight_series, axis=1)
+    contributions_df = prepared_df.mul(weight_series, axis=1)
     if mode != "analog_search":
         return contributions_df.sum(axis=1).round(4), None
 
-    if target_object_id is None or target_object_id not in normalized_df.index:
+    if target_object_id is None or target_object_id not in prepared_df.index:
         return contributions_df.sum(axis=1).round(4), None
 
-    target_vector = normalized_df.loc[str(target_object_id)]
-    similarity_df = 1.0 - (normalized_df.sub(target_vector, axis=1).abs())
-    similarity_df = similarity_df.clip(lower=0.0)
-    weighted_similarity = similarity_df.mul(weight_series, axis=1)
+    target_vector = prepared_df.loc[str(target_object_id)]
+    weighted_distance = prepared_df.sub(target_vector, axis=1).abs().mul(weight_series, axis=1)
     total_weight = float(weight_series.sum()) or 1.0
-    scores = (weighted_similarity.sum(axis=1) / total_weight).round(4)
+    mean_distance = weighted_distance.sum(axis=1) / total_weight
+    scores = (1.0 / (1.0 + mean_distance)).round(4)
     return scores, scores.copy()
 
 
@@ -484,16 +485,16 @@ def run_comparative_analysis(payload: AnalysisRequest) -> AnalysisResponse:
 
     normalized_weights, notes = _weights(payload.criteria, payload.auto_normalize_weights)
     frame, _ = _build_objects_frame(objects, payload.criteria)
-    normalized_df, notes_df = _normalize_criteria_frame(frame, payload.criteria)
+    prepared_df, notes_df = _prepare_criteria_frame(frame, payload.criteria)
     score_series, similarity_series = _score_frame(
-        normalized_df=normalized_df,
+        prepared_df=prepared_df,
         weights=normalized_weights,
         mode=payload.mode,
         target_object_id=payload.target_object_id,
     )
     rows, ranked_ids = _build_ranking(
         frame=frame,
-        normalized_df=normalized_df,
+        normalized_df=prepared_df,
         notes_df=notes_df,
         score_series=score_series,
         similarity_series=similarity_series,
@@ -506,10 +507,10 @@ def run_comparative_analysis(payload: AnalysisRequest) -> AnalysisResponse:
         raise ValueError("После расчета не удалось сформировать рейтинг")
 
     best = rows[0]
-    confidence_score, confidence_notes = _confidence(notes_df.loc[ranked_ids], normalized_df.loc[ranked_ids], len(payload.criteria))
+    confidence_score, confidence_notes = _confidence(notes_df.loc[ranked_ids], prepared_df.loc[ranked_ids], len(payload.criteria))
     scenarios = _build_stability_scenarios(
         payload=payload,
-        normalized_df=normalized_df,
+        normalized_df=prepared_df,
         baseline_ranked_ids=ranked_ids,
     )
 
@@ -530,11 +531,11 @@ def run_comparative_analysis(payload: AnalysisRequest) -> AnalysisResponse:
             target_object_id=payload.target_object_id,
             confidence_score=confidence_score,
             confidence_notes=confidence_notes,
-            sensitivity=_criterion_sensitivity(normalized_df.loc[ranked_ids], normalized_weights, payload.criteria),
+            sensitivity=_criterion_sensitivity(prepared_df.loc[ranked_ids], normalized_weights, payload.criteria),
             ranking_stability_note=_ranking_stability_note(ranked_scores),
             ranking_stability_scenarios=scenarios,
             analog_groups=_analog_groups(pd.Series(ranked_scores, index=[row.object_id for row in rows])) if payload.mode == "analog_search" else [],
-            dominance_pairs=_dominance_pairs(normalized_df, ranked_ids),
+            dominance_pairs=_dominance_pairs(prepared_df, ranked_ids),
         ),
         ranking=rows[: payload.top_n],
     )

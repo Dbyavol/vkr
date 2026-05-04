@@ -1,0 +1,32 @@
+{
+  "rows": 1000,
+  "iterations": 3,
+  "concurrency": 1,
+  "summary": {
+    "avg_profile_ms": 21.36,
+    "avg_pipeline_ms": 118.05,
+    "avg_total_ms": 139.41,
+    "max_total_ms": 164.15,
+    "min_total_ms": 122.39
+  },
+  "runs": [
+    {
+      "profile_ms": 25.37,
+      "pipeline_ms": 106.33,
+      "total_ms": 131.7,
+      "ranking_count": 10
+    },
+    {
+      "profile_ms": 19.7,
+      "pipeline_ms": 144.45,
+      "total_ms": 164.15,
+      "ranking_count": 10
+    },
+    {
+      "profile_ms": 19.01,
+      "pipeline_ms": 103.38,
+      "total_ms": 122.39,
+      "ranking_count": 10
+    }
+  ]
+}

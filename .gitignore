@@ -4,6 +4,7 @@ __pycache__/
 *.db
 *.sqlite3
 local_storage/
+load-test-storage/
 services/storage-service/local_storage/
 frontend/node_modules/
 frontend/dist/

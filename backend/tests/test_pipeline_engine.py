@@ -52,3 +52,32 @@ def test_pipeline_refresh_from_stored_file(sample_csv_bytes: bytes):
 
     assert refreshed["preview"]["rows_total"] == 3
     assert "profile" in refreshed
+
+
+def test_pipeline_engine_analog_search_with_geo_radius_filters_rows(sample_geo_csv_bytes: bytes):
+    payload = PipelineRequest(
+        filename="geo.csv",
+        config=PipelineConfig(
+            fields=[
+                FieldConfig(key="name", field_type="text"),
+                FieldConfig(key="price", field_type="float", normalization="minmax"),
+                FieldConfig(key="area", field_type="float", normalization="minmax"),
+                FieldConfig(key="lat", field_type="geo_latitude", normalization="none"),
+                FieldConfig(key="lon", field_type="geo_longitude", normalization="none"),
+            ],
+            criteria=[
+                CriterionConfig(key="price", name="Цена", weight=0.5, type="numeric", direction="target"),
+                CriterionConfig(key="area", name="Площадь", weight=0.5, type="numeric", direction="target"),
+            ],
+            analysis_mode="analog_search",
+            target_row_id="1",
+            geo_radius_km=3,
+        ),
+    )
+
+    result = asyncio.run(run_pipeline_via_services(filename="geo.csv", body=sample_geo_csv_bytes, payload=payload))
+
+    assert result.analysis_summary["mode"] == "analog_search"
+    assert result.analysis_summary["objects_count"] == 2
+    assert len(result.ranking) == 1
+    assert {item.object_id for item in result.ranking} == {"2"}

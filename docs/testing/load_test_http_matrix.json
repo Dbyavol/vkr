@@ -1,0 +1,117 @@
+{
+  "mode": "http_pipeline",
+  "rows_values": [
+    1000
+  ],
+  "concurrency_values": [
+    1,
+    2
+  ],
+  "iterations": 2,
+  "cases": [
+    {
+      "mode": "http_pipeline",
+      "base_url": "http://localhost:8050",
+      "rows": 1000,
+      "iterations": 2,
+      "concurrency": 1,
+      "summary": {
+        "upload": {
+          "avg_ms": 0.0,
+          "min_ms": 0.0,
+          "max_ms": 0.0,
+          "p95_ms": 0.0,
+          "p99_ms": 0.0,
+          "errors": 2,
+          "error_rate_pct": 100.0
+        },
+        "run": {
+          "avg_ms": 0.0,
+          "min_ms": 0.0,
+          "max_ms": 0.0,
+          "p95_ms": 0.0,
+          "p99_ms": 0.0,
+          "errors": 2,
+          "error_rate_pct": 100.0
+        },
+        "total": {
+          "avg_ms": 182.01,
+          "min_ms": 180.51,
+          "max_ms": 183.51,
+          "p95_ms": 183.51,
+          "p99_ms": 183.51,
+          "errors": 2,
+          "error_rate_pct": 100.0
+        }
+      },
+      "runs": [
+        {
+          "ok": false,
+          "upload_ms": 0.0,
+          "run_ms": 0.0,
+          "total_ms": 183.51,
+          "error": "Server error '503 Service Unavailable' for url 'http://localhost:8050/api/v1/pipeline/upload-profile'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/503"
+        },
+        {
+          "ok": false,
+          "upload_ms": 0.0,
+          "run_ms": 0.0,
+          "total_ms": 180.51,
+          "error": "Server error '503 Service Unavailable' for url 'http://localhost:8050/api/v1/pipeline/upload-profile'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/503"
+        }
+      ]
+    },
+    {
+      "mode": "http_pipeline",
+      "base_url": "http://localhost:8050",
+      "rows": 1000,
+      "iterations": 2,
+      "concurrency": 2,
+      "summary": {
+        "upload": {
+          "avg_ms": 0.0,
+          "min_ms": 0.0,
+          "max_ms": 0.0,
+          "p95_ms": 0.0,
+          "p99_ms": 0.0,
+          "errors": 2,
+          "error_rate_pct": 100.0
+        },
+        "run": {
+          "avg_ms": 0.0,
+          "min_ms": 0.0,
+          "max_ms": 0.0,
+          "p95_ms": 0.0,
+          "p99_ms": 0.0,
+          "errors": 2,
+          "error_rate_pct": 100.0
+        },
+        "total": {
+          "avg_ms": 170.44,
+          "min_ms": 169.83,
+          "max_ms": 171.04,
+          "p95_ms": 171.04,
+          "p99_ms": 171.04,
+          "errors": 2,
+          "error_rate_pct": 100.0
+        }
+      },
+      "runs": [
+        {
+          "ok": false,
+          "upload_ms": 0.0,
+          "run_ms": 0.0,
+          "total_ms": 171.04,
+          "error": "Server error '503 Service Unavailable' for url 'http://localhost:8050/api/v1/pipeline/upload-profile'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/503"
+        },
+        {
+          "ok": false,
+          "upload_ms": 0.0,
+          "run_ms": 0.0,
+          "total_ms": 169.83,
+          "error": "Server error '503 Service Unavailable' for url 'http://localhost:8050/api/v1/pipeline/upload-profile'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/503"
+        }
+      ]
+    }
+  ]
+}

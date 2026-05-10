@@ -1,3 +1,5 @@
+import type { ReactNode } from "react";
+
 type TargetObjectPreviewItem = {
   key: string;
   label: string;
@@ -8,15 +10,19 @@ type TargetObjectPreviewCardProps = {
   objectId: string;
   title: string;
   items: TargetObjectPreviewItem[];
+  actions?: ReactNode;
 };
 
-export function TargetObjectPreviewCard({ objectId, title, items }: TargetObjectPreviewCardProps) {
+export function TargetObjectPreviewCard({ objectId, title, items, actions }: TargetObjectPreviewCardProps) {
   if (!items.length) return null;
 
   return (
     <div className="target-object-preview">
       <div className="target-object-preview-head">
-        <span className="section-kicker">Выбранный объект</span>
+        <div className="target-object-preview-head-row">
+          <span className="section-kicker">Выбранный объект</span>
+          {actions ? <div className="target-object-preview-actions">{actions}</div> : null}
+        </div>
         <strong>{title}</strong>
         <span>ID: {objectId}</span>
       </div>

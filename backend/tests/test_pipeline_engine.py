@@ -110,3 +110,40 @@ def test_pipeline_engine_geo_radius_still_works_when_geo_fields_hidden(sample_ge
     assert result.analysis_summary["objects_count"] == 2
     assert len(result.ranking) == 1
     assert {item.object_id for item in result.ranking} == {"2"}
+
+
+def test_pipeline_engine_market_valuation_for_analogs(sample_geo_csv_bytes: bytes):
+    payload = PipelineRequest(
+        filename="geo.csv",
+        config=PipelineConfig(
+            fields=[
+                FieldConfig(key="name", field_type="text"),
+                FieldConfig(key="price", field_type="float", normalization="minmax"),
+                FieldConfig(key="area", field_type="float", normalization="minmax"),
+                FieldConfig(key="lat", field_type="geo_latitude", normalization="none", include_in_output=False),
+                FieldConfig(key="lon", field_type="geo_longitude", normalization="none", include_in_output=False),
+            ],
+            criteria=[
+                CriterionConfig(key="price", name="Цена", weight=0.5, type="numeric", direction="target"),
+                CriterionConfig(key="area", name="Площадь", weight=0.5, type="numeric", direction="target"),
+            ],
+            analysis_mode="analog_search",
+            target_row_id="1",
+            geo_radius_km=3,
+            top_n=1,
+            enable_market_valuation=True,
+            valuation_price_field_key="price",
+            valuation_analogs_count=3,
+        ),
+    )
+
+    result = asyncio.run(run_pipeline_via_services(filename="geo.csv", body=sample_geo_csv_bytes, payload=payload))
+
+    valuation = result.analysis_summary.get("market_valuation")
+    assert valuation is not None
+    assert valuation["price_field_key"] == "price"
+    assert valuation["analogs_used"] == 1
+    assert valuation["estimated_price"] == 105.0
+    assert valuation["target_price"] == 100.0
+    assert result.analysis_summary["criteria_count"] == 1
+    assert {item.key for item in result.ranking[0].contributions} == {"area"}

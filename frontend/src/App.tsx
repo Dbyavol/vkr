@@ -839,6 +839,62 @@ function normalizeCriteriaWeights(criteria: CriterionConfig[]): CriterionConfig[
   return normalized;
 }
 
+function normalizeCriteriaWeightsExcludingKey(criteria: CriterionConfig[], excludedKey: string): CriterionConfig[] {
+  if (!excludedKey) return criteria;
+  const active = criteria.filter((item) => item.key !== excludedKey);
+  const activeNormalized = normalizeCriteriaWeights(active);
+  const normalizedByKey = new Map(activeNormalized.map((item) => [item.key, item]));
+  return criteria.map((item) => (
+    item.key === excludedKey
+      ? { ...item, weight: 0 }
+      : (normalizedByKey.get(item.key) ?? item)
+  ));
+}
+
+function redistributeCriteriaWeights(criteria: CriterionConfig[], targetKey: string, nextWeight: number, excludedKey = ""): CriterionConfig[] {
+  const active = criteria.filter((item) => item.key !== excludedKey);
+  if (!active.length) return criteria;
+  if (active.length === 1) {
+    return criteria.map((item) => (
+      item.key === targetKey ? { ...item, weight: 1 } : (item.key === excludedKey ? { ...item, weight: 0 } : item)
+    ));
+  }
+
+  const clampedWeight = Math.min(1, Math.max(0, Number.isFinite(nextWeight) ? nextWeight : 0));
+  const others = active.filter((item) => item.key !== targetKey);
+  const othersTotal = others.reduce((sum, item) => sum + Number(item.weight || 0), 0);
+  const remaining = Number((1 - clampedWeight).toFixed(4));
+
+  let redistributedOthers: CriterionConfig[];
+  if (othersTotal > 0) {
+    redistributedOthers = others.map((item) => ({
+      ...item,
+      weight: Number(((Number(item.weight || 0) / othersTotal) * remaining).toFixed(4)),
+    }));
+  } else {
+    const equalWeight = Number((remaining / Math.max(others.length, 1)).toFixed(4));
+    redistributedOthers = others.map((item) => ({ ...item, weight: equalWeight }));
+  }
+
+  const currentSum = redistributedOthers.reduce((sum, item) => sum + item.weight, clampedWeight);
+  const drift = Number((1 - currentSum).toFixed(4));
+  if (redistributedOthers.length && drift) {
+    redistributedOthers[0] = {
+      ...redistributedOthers[0],
+      weight: Number((redistributedOthers[0].weight + drift).toFixed(4)),
+    };
+  }
+
+  const redistributedByKey = new Map(
+    [{ key: targetKey, weight: clampedWeight }, ...redistributedOthers].map((item) => [item.key, item.weight]),
+  );
+  return criteria.map((item) => {
+    if (item.key === excludedKey) return { ...item, weight: 0 };
+    const weight = redistributedByKey.get(item.key);
+    return weight === undefined ? item : { ...item, weight };
+  });
+}
+
 function syncCriteriaWithFields(
   fields: FieldConfig[],
   currentCriteria: CriterionConfig[],
@@ -1021,6 +1077,11 @@ function formatAnalysisMode(value: unknown) {
   return MODE_LABELS[String(value)] ?? String(value ?? "-");
 }
 
+function looksLikePriceFieldKey(key: string) {
+  const normalized = key.toLowerCase();
+  return ["price", "cost", "amount", "value", "budget", "fee"].some((hint) => normalized.includes(hint));
+}
+
 function translateAnalysisText(value: unknown) {
   return String(value ?? "-")
     .replace("Ranking is stable: the leader is ahead of the second object by", "Рейтинг устойчив: лидер опережает второй объект на")
@@ -1054,6 +1115,18 @@ function summaryCardEntries(summary: Record<string, unknown>) {
     .map((key) => [key, summary[key]] as const);
 }
 
+function formatMoneyValue(value: unknown) {
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numeric)) return "-";
+  return new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(numeric);
+}
+
+function getMarketValuation(summary: Record<string, unknown>): MarketValuationSummary | null {
+  const value = summary.market_valuation;
+  if (!value || typeof value !== "object") return null;
+  return value as MarketValuationSummary;
+}
+
 function escapeHtml(value: unknown) {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -1073,9 +1146,31 @@ type HistoryParameters = {
   criteria?: CriterionConfig[];
   target_row_id?: string | null;
   geo_radius_km?: number | null;
+  enable_market_valuation?: boolean;
+  valuation_price_field_key?: string | null;
+  valuation_analogs_count?: number | null;
   analysis_mode?: AnalysisMode;
   project_id?: number | null;
   scenario_title?: string | null;
+};
+
+type MarketValuationSummary = {
+  enabled: boolean;
+  price_field_key: string;
+  target_price?: number | null;
+  estimated_price?: number | null;
+  analogs_requested: number;
+  analogs_used: number;
+  price_min?: number | null;
+  price_max?: number | null;
+  method?: string;
+  note?: string;
+  comparables?: Array<{
+    object_id: string;
+    title: string;
+    price: number;
+    similarity: number;
+  }>;
 };
 
 const EMPTY_PREVIEW_RESPONSE: PreviewResponse = {
@@ -1128,6 +1223,9 @@ type SavedWorkflowState = {
   analysisMode?: AnalysisMode;
   targetRowId?: string;
   geoRadiusKm?: number | null;
+  enableMarketValuation?: boolean;
+  valuationPriceFieldKey?: string | null;
+  analogsCount?: number;
   result?: PipelineResult | null;
   activeProjectId?: number | null;
   historyProjectFilter?: number | "all";
@@ -1760,6 +1858,10 @@ export function App() {
   const [analysisMode, setAnalysisMode] = useState<AnalysisMode>(savedWorkflow.analysisMode ?? "analog_search");
   const [targetRowId, setTargetRowId] = useState(savedWorkflow.targetRowId ?? "");
   const [geoRadiusKm, setGeoRadiusKm] = useState<number | null>(savedWorkflow.geoRadiusKm ?? null);
+  const [enableMarketValuation, setEnableMarketValuation] = useState(savedWorkflow.enableMarketValuation ?? false);
+  const [valuationPriceFieldKey, setValuationPriceFieldKey] = useState(savedWorkflow.valuationPriceFieldKey ?? "");
+  const [analogsCount, setAnalogsCount] = useState(savedWorkflow.analogsCount ?? 10);
+  const [weightInputDrafts, setWeightInputDrafts] = useState<Record<string, string>>({});
   const [result, setResult] = useState<PipelineResult | null>(() => normalizePipelineResult(savedWorkflow.result ?? null));
   const [selectedResultId, setSelectedResultId] = useState(savedWorkflow.result?.ranking?.[0]?.object_id ?? "");
   const [rawResultValuesById, setRawResultValuesById] = useState<Record<string, Record<string, unknown>>>({});
@@ -1777,10 +1879,25 @@ export function App() {
   const [preprocessingValueView, setPreprocessingValueView] = useState<ValueViewMode>(savedWorkflow.preprocessingValueView ?? "pre_normalized");
   const [targetValueView, setTargetValueView] = useState<ValueViewMode>(savedWorkflow.targetValueView ?? "pre_normalized");
 
-  const totalWeight = useMemo(() => criteria.reduce((sum, item) => sum + Number(item.weight || 0), 0), [criteria]);
+  const excludedScoreCriterionKey = useMemo(
+    () => (analysisMode === "analog_search" && enableMarketValuation ? valuationPriceFieldKey : ""),
+    [analysisMode, enableMarketValuation, valuationPriceFieldKey],
+  );
+  const scoringCriteria = useMemo(
+    () => (excludedScoreCriterionKey ? criteria.filter((item) => item.key !== excludedScoreCriterionKey) : criteria),
+    [criteria, excludedScoreCriterionKey],
+  );
+  const totalWeight = useMemo(() => scoringCriteria.reduce((sum, item) => sum + Number(item.weight || 0), 0), [scoringCriteria]);
   const activePreprocessingFields = useMemo(
     () => fields.filter((field) => field.include_in_output),
     [fields],
+  );
+  const valuationPriceFieldOptions = useMemo(
+    () =>
+      activePreprocessingFields.filter(
+        (field) => ["numeric", "integer", "float"].includes(field.field_type),
+      ),
+    [activePreprocessingFields],
   );
   const visiblePreviewColumns = useMemo(() => {
     const allowed = new Set(activePreprocessingFields.map((field) => field.key));
@@ -1789,7 +1906,7 @@ export function App() {
   const completedStages = {
     data: Boolean(preview),
     preprocessing: fields.length > 0,
-    criteria: criteria.length > 0,
+    criteria: scoringCriteria.length > 0,
     results: Boolean(result),
     projects: projects.length > 0,
     history: history.length > 0,
@@ -1856,6 +1973,33 @@ export function App() {
   const geoLatitudeKey = useMemo(() => findGeoFieldKey(fields, "geo_latitude"), [fields]);
   const geoLongitudeKey = useMemo(() => findGeoFieldKey(fields, "geo_longitude"), [fields]);
   const geoSearchAvailable = Boolean(geoLatitudeKey && geoLongitudeKey);
+  useEffect(() => {
+    if (!enableMarketValuation) return;
+    if (valuationPriceFieldKey && valuationPriceFieldOptions.some((field) => field.key === valuationPriceFieldKey)) {
+      return;
+    }
+    const fallback =
+      valuationPriceFieldOptions.find((field) => looksLikePriceFieldKey(field.key))?.key
+      ?? valuationPriceFieldOptions[0]?.key
+      ?? "";
+    if (fallback !== valuationPriceFieldKey) {
+      setValuationPriceFieldKey(fallback);
+    }
+  }, [enableMarketValuation, valuationPriceFieldKey, valuationPriceFieldOptions]);
+
+  useEffect(() => {
+    if (!excludedScoreCriterionKey) return;
+    setCriteria((current) => {
+      if (!current.some((item) => item.key === excludedScoreCriterionKey)) {
+        return current;
+      }
+      const normalized = normalizeCriteriaWeightsExcludingKey(current, excludedScoreCriterionKey);
+      const changed = normalized.some((item, index) =>
+        item.weight !== current[index]?.weight,
+      );
+      return changed ? normalized : current;
+    });
+  }, [excludedScoreCriterionKey]);
   const selectedTargetRow = useMemo(
     () => rowsForView(preview, targetValueView).find((row) => row.id === targetRowId) ?? null,
     [preview, targetRowId, targetValueView],
@@ -2088,6 +2232,9 @@ export function App() {
     setAnalysisMode("analog_search");
     setTargetRowId("");
     setGeoRadiusKm(null);
+    setEnableMarketValuation(false);
+    setValuationPriceFieldKey("");
+    setAnalogsCount(10);
     setResult(null);
     setSelectedResultId("");
     setRawResultValuesById({});
@@ -2134,6 +2281,9 @@ export function App() {
     setFields([]);
     setTargetRowId("");
     setGeoRadiusKm(null);
+    setEnableMarketValuation(false);
+    setValuationPriceFieldKey("");
+    setAnalogsCount(10);
     setHistogramBinsByField({});
     setHistogramDraftBinsByField({});
     setChartModeByField({});
@@ -2358,6 +2508,9 @@ export function App() {
       analysisMode,
       targetRowId,
       geoRadiusKm,
+      enableMarketValuation,
+      valuationPriceFieldKey,
+      analogsCount,
       result: compactPipelineResultForStorage(result),
       activeProjectId,
       historyProjectFilter,
@@ -2393,6 +2546,9 @@ export function App() {
         analysisMode,
         targetRowId,
         geoRadiusKm,
+        enableMarketValuation,
+        valuationPriceFieldKey,
+        analogsCount,
         result: null,
         activeProjectId,
         historyProjectFilter,
@@ -2429,6 +2585,10 @@ export function App() {
     criteria,
     analysisMode,
     targetRowId,
+    geoRadiusKm,
+    enableMarketValuation,
+    valuationPriceFieldKey,
+    analogsCount,
     result,
     activeProjectId,
     historyProjectFilter,
@@ -2523,6 +2683,10 @@ export function App() {
       setFields([]);
       setCriteria([]);
       setTargetRowId("");
+      setGeoRadiusKm(null);
+      setEnableMarketValuation(false);
+      setValuationPriceFieldKey("");
+      setAnalogsCount(10);
       setLastHistoryId(null);
       return;
     }
@@ -2555,6 +2719,10 @@ export function App() {
         setFields([]);
         setCriteria([]);
         setTargetRowId("");
+        setGeoRadiusKm(null);
+        setEnableMarketValuation(false);
+        setValuationPriceFieldKey("");
+        setAnalogsCount(10);
         setLastHistoryId(null);
         setScenarioTitle("Сценарий сравнительного анализа");
         setHistogramBinsByField({});
@@ -2580,6 +2748,9 @@ export function App() {
       setCriteria(nextCriteria.length ? nextCriteria : criteriaDefaults(normalizedFields, recommendedWeights, parameters.analysis_mode === "rating" ? "rating" : "analog_search"));
       setTargetRowId(parameters.target_row_id ?? "");
       setGeoRadiusKm(parameters.geo_radius_km ?? null);
+      setEnableMarketValuation(Boolean(parameters.enable_market_valuation));
+      setValuationPriceFieldKey(parameters.valuation_price_field_key ?? "");
+      setAnalogsCount(Math.max(1, parameters.valuation_analogs_count ?? 10));
       setAnalysisMode(parameters.analysis_mode === "rating" ? "rating" : "analog_search");
       setScenarioTitle(parameters.scenario_title ?? latest.title);
       setDatasetFileId(latest.dataset_file_id ?? null);
@@ -2655,6 +2826,9 @@ export function App() {
     }
     setTargetRowId(parameters.target_row_id ?? "");
     setGeoRadiusKm(parameters.geo_radius_km ?? null);
+    setEnableMarketValuation(Boolean(parameters.enable_market_valuation));
+    setValuationPriceFieldKey(parameters.valuation_price_field_key ?? "");
+    setAnalogsCount(Math.max(1, parameters.valuation_analogs_count ?? 10));
     updateAnalysisMode(parameters.analysis_mode === "rating" ? "rating" : "analog_search");
     setActiveProjectId(parameters.project_id ?? item.project_id ?? null);
     setScenarioTitle(`${item.title} (повтор)`);
@@ -2715,15 +2889,22 @@ export function App() {
     setError(null);
     try {
       const effectiveFields = enforceRequiredScaling(fields);
+      const effectiveCriteria = scoringCriteria;
+      if (!effectiveCriteria.length) {
+        throw new Error("Выберите хотя бы один критерий для расчета.");
+      }
+      const effectiveTopN = analysisMode === "analog_search" ? Math.max(1, analogsCount) : Math.max(preview?.rows_total ?? 0, 10);
       if (effectiveFields !== fields) {
         setFields(effectiveFields);
       }
       const response = await runPipeline(
         file,
         effectiveFields,
-        criteria,
+        effectiveCriteria,
         analysisMode === "analog_search" ? targetRowId : undefined,
         analysisMode === "analog_search" ? geoRadiusKm : null,
+        analysisMode === "analog_search" ? enableMarketValuation : false,
+        analysisMode === "analog_search" ? valuationPriceFieldKey || null : null,
         analysisMode,
         token || undefined,
         activeProjectId,
@@ -2734,7 +2915,7 @@ export function App() {
         undefined,
         false,
         10,
-        Math.max(preview?.rows_total ?? 0, 10),
+        effectiveTopN,
       );
       // Validate response shape to avoid runtime exceptions in the UI
       if (!response || !Array.isArray(response.ranking)) {
@@ -2862,33 +3043,80 @@ export function App() {
     }
   }
 
-  function updateCriterion(index: number, patch: Partial<CriterionConfig>) {
-    setCriteria((current) => current.map((item, idx) => (idx === index ? { ...item, ...patch } : item)));
+  function updateCriterionByKey(key: string, patch: Partial<CriterionConfig>) {
+    setCriteria((current) => current.map((item) => (item.key === key ? { ...item, ...patch } : item)));
+  }
+
+  function getCriterionWeightInputValue(key: string, weight: number) {
+    return weightInputDrafts[key] ?? String(weight);
+  }
+
+  function handleCriterionWeightInputChange(key: string, rawValue: string) {
+    setWeightInputDrafts((current) => ({ ...current, [key]: rawValue }));
+    const normalizedRaw = rawValue.replace(",", ".");
+    if (!/^\d*(?:\.\d*)?$/.test(normalizedRaw) || normalizedRaw === "" || normalizedRaw === ".") {
+      return;
+    }
+    const parsed = Number(normalizedRaw);
+    if (!Number.isFinite(parsed)) return;
+    updateCriterionByKey(key, { weight: parsed });
+  }
+
+  function handleCriterionWeightInputBlur(key: string, currentWeight: number) {
+    setWeightInputDrafts((current) => {
+      const next = { ...current };
+      const rawValue = next[key];
+      if (rawValue === undefined) return current;
+      const normalizedRaw = rawValue.replace(",", ".");
+      if (!/^\d*(?:\.\d*)?$/.test(normalizedRaw) || normalizedRaw === "" || normalizedRaw === ".") {
+        next[key] = String(currentWeight);
+        return next;
+      }
+      const parsed = Number(normalizedRaw);
+      next[key] = Number.isFinite(parsed) ? String(parsed) : String(currentWeight);
+      return next;
+    });
+  }
+
+  function updateCriterionWeightFromSlider(key: string, nextWeight: number) {
+    setWeightInputDrafts((current) => {
+      if (!(key in current)) return current;
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+    setCriteria((current) => redistributeCriteriaWeights(current, key, nextWeight, excludedScoreCriterionKey));
   }
 
   function normalizeWeights() {
+    setWeightInputDrafts({});
     setCriteria((current) => {
-      const total = current.reduce((sum, item) => sum + Number(item.weight || 0), 0);
+      const active = excludedScoreCriterionKey ? current.filter((item) => item.key !== excludedScoreCriterionKey) : current;
+      const total = active.reduce((sum, item) => sum + Number(item.weight || 0), 0);
       if (total <= 0) return current;
-      const normalized = current.map((item) => ({ ...item, weight: Number((item.weight / total).toFixed(4)) }));
+      const normalized = active.map((item) => ({ ...item, weight: Number((item.weight / total).toFixed(4)) }));
       const drift = Number((1 - normalized.reduce((sum, item) => sum + item.weight, 0)).toFixed(4));
       if (normalized.length && drift) {
         normalized[0] = { ...normalized[0], weight: Number((normalized[0].weight + drift).toFixed(4)) };
       }
-      return normalized;
+      const normalizedByKey = new Map(normalized.map((item) => [item.key, item]));
+      return current.map((item) => normalizedByKey.get(item.key) ?? item);
     });
   }
 
   function setEqualWeights() {
+    setWeightInputDrafts({});
     setCriteria((current) => {
-      if (!current.length) return current;
-      const weight = Number((1 / current.length).toFixed(4));
-      const patched = current.map((item) => ({ ...item, weight }));
-      return patched;
+      const active = excludedScoreCriterionKey ? current.filter((item) => item.key !== excludedScoreCriterionKey) : current;
+      if (!active.length) return current;
+      const weight = Number((1 / active.length).toFixed(4));
+      const patchedByKey = new Map(active.map((item) => [item.key, { ...item, weight }]));
+      return current.map((item) => patchedByKey.get(item.key) ?? item);
     });
   }
 
   function applyRecommendedWeights() {
+    setWeightInputDrafts({});
     setCriteria((current) => {
       const recommended = criteriaDefaults(fields, recommendedWeights, analysisMode);
       const currentByKey = new Map(current.map((item) => [item.key, item]));
@@ -2902,7 +3130,10 @@ export function App() {
           target_value: existing?.target_value ?? item.target_value,
         };
       });
-      return normalizeCriteriaWeights(merged);
+      const activeMerged = excludedScoreCriterionKey ? merged.filter((item) => item.key !== excludedScoreCriterionKey) : merged;
+      const normalizedActive = normalizeCriteriaWeights(activeMerged);
+      const normalizedByKey = new Map(normalizedActive.map((item) => [item.key, item]));
+      return merged.map((item) => normalizedByKey.get(item.key) ?? item);
     });
   }
 
@@ -2919,7 +3150,7 @@ export function App() {
   }
 
   function buildCurrentReportHtml() {
-    return result ? buildHtmlReport(result, criteria) : "";
+    return result ? buildHtmlReport(result, scoringCriteria) : "";
   }
 
   function openReportPreview() {
@@ -2952,7 +3183,7 @@ export function App() {
     setLoading(true);
     setError(null);
     try {
-      await downloadDocxReport(result, criteria);
+      await downloadDocxReport(result, scoringCriteria);
     } catch (reportError) {
       setError(reportError instanceof Error ? reportError.message : "Не удалось скачать DOCX-отчет");
     } finally {
@@ -3058,7 +3289,7 @@ export function App() {
 
   function exportSortedDatasetCsv() {
     if (!result) return;
-    const csv = buildSortedDatasetCsv(result, criteria, analysisMode);
+    const csv = buildSortedDatasetCsv(result, scoringCriteria, analysisMode);
     downloadBlob("sorted-scored-dataset.csv", csv, "text/csv;charset=utf-8");
   }
 
@@ -3099,7 +3330,7 @@ export function App() {
           </div>
           <div className="topbar-actions">
             <button className="ghost-button" onClick={resetWorkflow}>Новый расчет</button>
-            <button onClick={handleRun} disabled={(!file && !datasetFileId) || !preview || criteria.length === 0 || loading}>
+            <button onClick={handleRun} disabled={(!file && !datasetFileId) || !preview || scoringCriteria.length === 0 || loading}>
               {loading ? "Выполняется..." : "Запустить расчет"}
             </button>
             {user ? (
@@ -3935,19 +4166,19 @@ export function App() {
                 <span className="section-kicker">Этап 3</span>
                 <h2>Режим и веса критериев</h2>
               </div>
-              {criteria.length > 0 ? (
+              {scoringCriteria.length > 0 ? (
                 <div className="criteria-actions">
                   <div className="weight-meter">
                     <span><LabelWithTip label="Σ весов" tip={<><span>Сумма весов критериев в нормализованной постановке:</span><Formula latex={"\\sum_{i=1}^{n} w_i = 1"} /></>} /></span>
                     <strong>{totalWeight.toFixed(3)}</strong>
                   </div>
-                  <button className="ghost-button" onClick={setEqualWeights} disabled={criteria.length === 0}>
+                  <button className="ghost-button" onClick={setEqualWeights} disabled={scoringCriteria.length === 0}>
                     Поставить одинаковые веса
                   </button>
                   <button className="ghost-button" onClick={applyRecommendedWeights} disabled={!Object.keys(recommendedWeights).length}>
                     Рекомендованные веса
                   </button>
-                  <button onClick={normalizeWeights} disabled={criteria.length === 0 || totalWeight <= 0}>
+                  <button onClick={normalizeWeights} disabled={scoringCriteria.length === 0 || totalWeight <= 0}>
                     Нормализовать веса
                   </button>
                 </div>
@@ -3989,12 +4220,48 @@ export function App() {
                       />
                     </label>
                   ) : null}
-                  <ValueViewSwitch value={targetValueView} onChange={setTargetValueView} />
+                  <label>
+                    Количество аналогов
+                    <input
+                      type="number"
+                      min="1"
+                      max="100"
+                      step="1"
+                      value={analogsCount}
+                      onChange={(event) => setAnalogsCount(Math.max(1, Number(event.target.value) || 1))}
+                    />
+                  </label>
+                  <label className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={enableMarketValuation}
+                      onChange={(event) => setEnableMarketValuation(event.target.checked)}
+                    />
+                    <span>Нужна оценка стоимости</span>
+                  </label>
+                  {enableMarketValuation ? (
+                    valuationPriceFieldOptions.length ? (
+                      <label>
+                        Колонка со стоимостью
+                        <select value={valuationPriceFieldKey} onChange={(event) => setValuationPriceFieldKey(event.target.value)}>
+                          {valuationPriceFieldOptions.map((field) => (
+                            <option key={field.key} value={field.key}>{field.key}</option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : (
+                      <div className="target-explain">Нет числовых полей, подходящих для оценки стоимости.</div>
+                    )
+                  ) : null}
+                  {enableMarketValuation && valuationPriceFieldKey ? (
+                    <div className="target-explain">Поле стоимости исключается из расчета близости и используется только для оценки.</div>
+                  ) : null}
                   {selectedTargetRow ? (
                     <TargetObjectPreviewCard
                       objectId={selectedTargetRow.id}
                       title={objectLabelMap.get(selectedTargetRow.id) || `Объект ${selectedTargetRow.id}`}
                       items={selectedTargetPreviewItems}
+                      actions={<ValueViewSwitch value={targetValueView} onChange={setTargetValueView} />}
                     />
                   ) : null}
                 </>
@@ -4016,9 +4283,9 @@ export function App() {
                 ))}
               </div>
             ) : null}
-            {criteria.length > 0 ? (
+            {scoringCriteria.length > 0 ? (
               <div className="criteria-board">
-                {criteria.map((criterion, index) => (
+                {scoringCriteria.map((criterion) => (
                   <article className="criterion-card" key={criterion.key}>
                     <div className="criterion-main">
                       <h3>{criterion.key.toUpperCase()}</h3>
@@ -4030,14 +4297,15 @@ export function App() {
                         max="1"
                         step="0.01"
                         value={criterion.weight}
-                        onChange={(event) => updateCriterion(index, { weight: Number(event.target.value) })}
+                        onChange={(event) => updateCriterionWeightFromSlider(criterion.key, Number(event.target.value))}
                       />
                       <input
                         type="number"
                         min="0"
                         step="0.01"
-                        value={criterion.weight}
-                        onChange={(event) => updateCriterion(index, { weight: Number(event.target.value) })}
+                        value={getCriterionWeightInputValue(criterion.key, criterion.weight)}
+                        onChange={(event) => handleCriterionWeightInputChange(criterion.key, event.target.value)}
+                        onBlur={() => handleCriterionWeightInputBlur(criterion.key, criterion.weight)}
                       />
                     </div>
                     <label>
@@ -4046,8 +4314,8 @@ export function App() {
                         tip="Правило монотонности критерия: максимизация, минимизация либо минимизация отклонения от целевого значения."
                       />
                       <select
-                        value={criterion.direction}
-                        onChange={(event) => updateCriterion(index, { direction: event.target.value as CriterionConfig["direction"] })}
+                          value={criterion.direction}
+                          onChange={(event) => updateCriterionByKey(criterion.key, { direction: event.target.value as CriterionConfig["direction"] })}
                       >
                         <option value="maximize">Больше лучше</option>
                         <option value="minimize">Меньше лучше</option>
@@ -4088,6 +4356,7 @@ export function App() {
 
                {displayResult ? (() => {
                  const objectLabelById = new Map(displayResult.ranking.map((item) => [String(item.object_id), item.title || `Объект ${item.object_id}`]));
+                 const marketValuation = getMarketValuation(displayResult.analysis_summary);
                  return (
                  <>
                   <div className="metric-row">
@@ -4098,6 +4367,45 @@ export function App() {
                       </div>
                     ))}
                   </div>
+                  {marketValuation?.enabled ? (
+                    <div className="insight-card market-valuation-card">
+                      <span className="section-kicker">Оценка стоимости</span>
+                      <h3>Рыночная стоимость целевого объекта</h3>
+                      <div className="metric-row market-valuation-metrics">
+                        <div className="metric">
+                          <span>Оценка</span>
+                          <strong>{formatMoneyValue(marketValuation.estimated_price)}</strong>
+                        </div>
+                        <div className="metric">
+                          <span>Диапазон аналогов</span>
+                          <strong>{formatMoneyValue(marketValuation.price_min)} – {formatMoneyValue(marketValuation.price_max)}</strong>
+                        </div>
+                        <div className="metric">
+                          <span>Аналогов учтено</span>
+                          <strong>{marketValuation.analogs_used}</strong>
+                        </div>
+                        <div className="metric">
+                          <span>Поле стоимости</span>
+                          <strong>{marketValuation.price_field_key}</strong>
+                        </div>
+                      </div>
+                      {marketValuation.target_price !== null && marketValuation.target_price !== undefined ? (
+                        <p>Текущее значение у целевого объекта: {formatMoneyValue(marketValuation.target_price)}</p>
+                      ) : null}
+                      {marketValuation.note ? <p>{marketValuation.note}</p> : null}
+                      {marketValuation.comparables?.length ? (
+                        <div className="stability-list">
+                          {marketValuation.comparables.map((item) => (
+                            <div className="stability-row" key={`valuation-${item.object_id}`}>
+                              <strong>{item.title}</strong>
+                              <span>Цена: {formatMoneyValue(item.price)}</span>
+                              <span>Близость: {item.similarity.toFixed(4)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                   <div className="insight-grid">
                     <div className="insight-card">
                       <span className="section-kicker">Надежность</span>

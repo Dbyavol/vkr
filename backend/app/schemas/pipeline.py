@@ -91,6 +91,9 @@ class PipelineConfig(BaseModel):
     geo_radius_km: float | None = Field(default=None, ge=0)
     analysis_mode: Literal["rating", "analog_search"] = "rating"
     top_n: int = 10
+    enable_market_valuation: bool = False
+    valuation_price_field_key: str | None = None
+    valuation_analogs_count: int = Field(default=5, ge=1, le=100)
     filter_criteria: AnalysisFilters | None = None
     include_stability_scenarios: bool = False
     stability_variation_pct: float = Field(default=10.0, ge=0.0, le=100.0)

@@ -1658,6 +1658,18 @@ th {
   color: #155e75;
 }
 
+.checkbox-row {
+  display: flex !important;
+  align-items: center;
+  gap: 10px;
+}
+
+.checkbox-row input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+}
+
 .target-object-preview {
   grid-column: 1 / -1;
   display: grid;
@@ -1671,6 +1683,20 @@ th {
 .target-object-preview-head {
   display: grid;
   gap: 4px;
+}
+
+.target-object-preview-head-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.target-object-preview-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
 }
 
 .target-object-preview-head strong {
@@ -2254,6 +2280,14 @@ th {
 
 .insight-card p {
   margin-bottom: 8px;
+}
+
+.market-valuation-card {
+  margin-bottom: 18px;
+}
+
+.market-valuation-metrics {
+  margin-bottom: 12px;
 }
 
 .insight-row {

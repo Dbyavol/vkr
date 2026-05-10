@@ -150,6 +150,102 @@ def _restore_hidden_geo_values(
     return restored_rows
 
 
+def _market_valuation_summary(
+    *,
+    rows: list[dict[str, Any]],
+    ranking: list[dict[str, Any]],
+    target_row_id: str | None,
+    price_field_key: str | None,
+    analogs_count: int,
+) -> dict[str, Any] | None:
+    if not rows or not ranking or not target_row_id or not price_field_key:
+        return None
+
+    rows_by_id = {str(row.get("id")): row for row in rows}
+    target_row = rows_by_id.get(str(target_row_id))
+    if not target_row:
+        return None
+
+    target_values = dict(target_row.get("pre_normalized_values") or target_row.get("values") or {})
+    target_price = _to_float(target_values.get(price_field_key))
+
+    candidates: list[dict[str, Any]] = []
+    for item in ranking:
+        object_id = str(item.get("object_id"))
+        if object_id == str(target_row_id):
+            continue
+        row = rows_by_id.get(object_id)
+        if not row:
+            continue
+        values = dict(row.get("pre_normalized_values") or row.get("values") or {})
+        price_value = _to_float(values.get(price_field_key))
+        if price_value is None:
+            continue
+        similarity = _to_float(item.get("similarity_to_target"))
+        if similarity is None:
+            similarity = _to_float(item.get("score"))
+        if similarity is None:
+            continue
+        candidates.append(
+            {
+                "object_id": object_id,
+                "title": item.get("title") or row.get("title") or f"Объект {object_id}",
+                "price": price_value,
+                "similarity": max(similarity, 0.0),
+            }
+        )
+
+    selected = candidates[: max(1, int(analogs_count or 1))]
+    if not selected:
+        return {
+            "enabled": True,
+            "price_field_key": price_field_key,
+            "target_price": target_price,
+            "estimated_price": None,
+            "analogs_requested": int(analogs_count or 1),
+            "analogs_used": 0,
+            "price_min": None,
+            "price_max": None,
+            "comparables": [],
+            "method": "weighted_similarity",
+            "note": "Подходящие аналоги с заполненной ценой не найдены.",
+        }
+
+    total_weight = sum(item["similarity"] for item in selected)
+    if total_weight <= 0:
+        weighted_sum = sum(item["price"] for item in selected)
+        total_weight = float(len(selected))
+        method = "equal_average"
+        note = "Близости аналогов оказались нулевыми, поэтому использовано простое среднее."
+    else:
+        weighted_sum = sum(item["price"] * item["similarity"] for item in selected)
+        method = "weighted_similarity"
+        note = "Оценка рассчитана как средневзвешенная цена по близости найденных аналогов."
+
+    estimated_price = weighted_sum / total_weight if total_weight > 0 else None
+    return {
+        "enabled": True,
+        "price_field_key": price_field_key,
+        "target_price": round(target_price, 4) if target_price is not None else None,
+        "estimated_price": round(estimated_price, 4) if estimated_price is not None else None,
+        "analogs_requested": int(analogs_count or 1),
+        "analogs_used": len(selected),
+        "price_min": round(min(item["price"] for item in selected), 4),
+        "price_max": round(max(item["price"] for item in selected), 4),
+        "comparables": [
+            {
+                "object_id": item["object_id"],
+                "title": item["title"],
+                "price": round(item["price"], 4),
+                "similarity": round(item["similarity"], 4),
+            }
+            for item in selected
+        ],
+        "method": method,
+        "note": note,
+    }
+
+
 async def fetch_preview(*, filename: str, body: bytes) -> dict[str, Any]:
     started_at = start_timer()
     preview = parse_dataset_bytes(filename, body).model_dump()
@@ -608,6 +704,18 @@ def _prepare_criteria_for_analysis(
     return prepared
 
 
+def _exclude_valuation_price_criterion(
+    criteria: list[dict[str, Any]],
+    *,
+    analysis_mode: str,
+    enable_market_valuation: bool,
+    valuation_price_field_key: str | None,
+) -> list[dict[str, Any]]:
+    if analysis_mode != "analog_search" or not enable_market_valuation or not valuation_price_field_key:
+        return criteria
+    return [criterion for criterion in criteria if str(criterion.get("key")) != str(valuation_price_field_key)]
+
+
 def _sanitize_fields_for_preprocessing(fields: list[dict[str, Any]]) -> list[dict[str, Any]]:
     sanitized: list[dict[str, Any]] = []
     for field in fields:
@@ -670,27 +778,47 @@ async def run_pipeline_via_services(
         target_row_id=payload.config.target_row_id,
         radius_km=payload.config.geo_radius_km,
     )
-    analysis = await analyze_dataset(
-        rows=processed_rows,
-        criteria=_prepare_criteria_for_analysis(
+    effective_criteria = _exclude_valuation_price_criterion(
+        _prepare_criteria_for_analysis(
             [criterion.model_dump() for criterion in payload.config.criteria],
             fields_payload,
             rows=processed_rows,
             target_row_id=payload.config.target_row_id,
             fallback_target_values=raw_target_values,
         ),
+        analysis_mode=payload.config.analysis_mode,
+        enable_market_valuation=payload.config.enable_market_valuation,
+        valuation_price_field_key=payload.config.valuation_price_field_key,
+    )
+    if not effective_criteria:
+        raise ValueError("После исключения поля стоимости не осталось критериев для расчета аналогов.")
+
+    analysis = await analyze_dataset(
+        rows=processed_rows,
+        criteria=effective_criteria,
         target_row_id=payload.config.target_row_id,
         mode=payload.config.analysis_mode,
-        top_n=payload.config.top_n,
+        top_n=max(
+            payload.config.top_n,
+            payload.config.valuation_analogs_count if payload.config.enable_market_valuation else 0,
+        ),
         filter_criteria=payload.config.filter_criteria.model_dump() if payload.config.filter_criteria else None,
         include_stability_scenarios=payload.config.include_stability_scenarios,
         stability_variation_pct=payload.config.stability_variation_pct,
     )
+    if payload.config.analysis_mode == "analog_search" and payload.config.enable_market_valuation:
+        analysis["summary"]["market_valuation"] = _market_valuation_summary(
+            rows=processed_rows,
+            ranking=analysis.get("ranking") or [],
+            target_row_id=payload.config.target_row_id,
+            price_field_key=payload.config.valuation_price_field_key,
+            analogs_count=payload.config.valuation_analogs_count,
+        )
     response_payload = PipelineRunResponse(
         import_preview=lightweight_preview(preview),
         preprocessing_summary=preprocessing["summary"],
         analysis_summary=analysis["summary"],
-        ranking=analysis["ranking"],
+        ranking=(analysis.get("ranking") or [])[: payload.config.top_n],
     )
     history_item = await save_comparison_history(
         user=user,

@@ -50,6 +50,8 @@ class FieldConfig(BaseModel):
     encoding: EncodingMethod = "none"
     rounding_precision: int | None = None
     datetime_format: str | None = None
+    unit_family: str | None = None
+    target_unit: str | None = None
     ordinal_map: dict[str, float] | None = None
     binary_map: dict[str, float] | None = None
 
@@ -150,6 +152,7 @@ class Contribution(BaseModel):
     key: str
     name: str
     raw_value: Any
+    transformed_value: Any | None = None
     normalized_value: float
     weight: float
     contribution: float

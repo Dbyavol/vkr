@@ -10,7 +10,7 @@ skinparam class {
   ArrowColor #475569
 }
 
-package "PostgreSQL: analysis (single DB)" {
+package "Реляционная база данных" {
   entity "users" as users {
     * id : int <<PK>>
     --
@@ -129,8 +129,8 @@ package "PostgreSQL: analysis (single DB)" {
   }
 }
 
-cloud "S3 / MinIO" as s3 {
-  rectangle "Physical object storage\n(bucket_name + storage_key)" as s3_objects
+cloud "Объектное хранилище данных" as s3 {
+  rectangle "bucket_name + storage_key" as s3_objects
 }
 
 object_types ||--o{ objects : object_type_id
@@ -143,15 +143,5 @@ stored_files ||--o{ comparison_history : dataset_file_id
 stored_files ||--o{ comparison_history : result_file_id
 
 stored_files ..> s3_objects : bucket_name + storage_key
-
-note right of projects
-Logical link: owner_user_id -> users.id
-(not declared as DB FK in current ORM)
-end note
-
-note right of comparison_history
-Logical link: user_id -> users.id
-(not declared as DB FK in current ORM)
-end note
 
 @enduml

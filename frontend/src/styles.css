@@ -522,6 +522,14 @@ p {
   margin-bottom: 20px;
 }
 
+.panel-head-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
 .panel-head.slim {
   margin-top: 20px;
   margin-bottom: 12px;
@@ -729,6 +737,41 @@ p {
 
 .schema-panel {
   margin-top: 0;
+}
+
+.schema-table-wrap {
+  overflow: visible;
+  max-height: none;
+}
+
+.schema-table {
+  table-layout: fixed;
+}
+
+.schema-table th:nth-child(1),
+.schema-table td:nth-child(1) {
+  width: 160px;
+}
+
+.schema-table th:nth-child(2),
+.schema-table td:nth-child(2) {
+  width: 116px;
+  white-space: normal;
+}
+
+.schema-table th:nth-child(3),
+.schema-table td:nth-child(3),
+.schema-table th:nth-child(4),
+.schema-table td:nth-child(4) {
+  width: 92px;
+  text-align: center;
+}
+
+.schema-table th:nth-child(5),
+.schema-table td:nth-child(5) {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .muted-cell {

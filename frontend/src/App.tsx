@@ -26,6 +26,7 @@ import type {
   AnalysisMode,
   AuthUser,
   ComparisonHistoryItem,
+  ChartPoint,
   CriterionConfig,
   FieldProfile,
   FieldConfig,
@@ -51,6 +52,18 @@ const DATETIME_FORMAT_OPTIONS = [
   "YYYY/MM/DD HH:mm:ss",
   "DD.MM.YYYY HH:mm:ss",
 ] as const;
+const UNIT_OPTIONS_BY_FAMILY: Record<string, Array<{ value: string; label: string }>> = {
+  distance: [
+    { value: "m", label: "Метры" },
+    { value: "km", label: "Километры" },
+    { value: "mi", label: "Мили" },
+  ],
+  weight: [
+    { value: "g", label: "Граммы" },
+    { value: "kg", label: "Килограммы" },
+    { value: "lb", label: "Фунты" },
+  ],
+};
 
 const stages: Array<{ id: StageId; title: string; caption: string }> = [
   { id: "data", title: "Данные", caption: "Загрузка и предпросмотр" },
@@ -105,6 +118,11 @@ function inferUiType(column: PreviewColumn): FieldConfig["field_type"] {
     return isIntegerLikeColumn(column) ? "integer" : "float";
   }
   return column.inferred_type;
+}
+
+function getUnitOptions(unitFamily?: string | null) {
+  if (!unitFamily) return [];
+  return UNIT_OPTIONS_BY_FAMILY[unitFamily] ?? [];
 }
 
 function uniqueSamples(column: PreviewColumn) {
@@ -208,6 +226,15 @@ function buildObjectLabel(
   return String(row.values.name ?? row.values.title ?? row.values.object_name ?? `Объект ${row.id}`);
 }
 
+function buildObjectLabelFromValues(
+  objectId: string,
+  values: Record<string, unknown> | null | undefined,
+  fields: FieldConfig[],
+) {
+  if (!values) return "";
+  return buildObjectLabel({ id: objectId, values }, fields);
+}
+
 function humanizeFieldKey(key: string) {
   return key.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
@@ -267,9 +294,123 @@ function fieldDefaults(column: PreviewColumn): FieldConfig {
     encoding: fieldType === "categorical" ? "ordinal" : "none",
     rounding_precision: fieldType === "float" ? 2 : null,
     datetime_format: fieldType === "datetime" ? "YYYY-MM-DD" : null,
+    unit_family: null,
+    target_unit: null,
     ordinal_map: fieldType === "categorical" ? buildOrdinalMap(categories) : undefined,
     binary_map: fieldType === "binary" ? { true: 1, false: 0, "1": 1, "0": 0 } : undefined,
   };
+}
+
+function buildResetFields(rawPreview: PreviewResponse | null, preview: PreviewResponse | null): FieldConfig[] {
+  const sourceColumns = rawPreview?.columns ?? preview?.columns ?? [];
+  return enforceRequiredScaling(sourceColumns.map((column) => fieldDefaults(column)));
+}
+
+function buildInitialFields(
+  preview: PreviewResponse | null,
+  profile: FieldProfile[],
+): FieldConfig[] {
+  const previewFields = (preview?.columns ?? []).map((column) => fieldDefaults(column));
+  if (!profile.length) {
+    return enforceRequiredScaling(previewFields);
+  }
+
+  const previewByKey = new Map(previewFields.map((field) => [field.key, field]));
+  const nextFields = profile.map((field) => {
+    const baseField = previewByKey.get(field.key) ?? {
+      ...fieldDefaults({
+        source_name: field.key,
+        normalized_name: field.key,
+        inferred_type: field.inferred_type,
+        missing_count: field.missing_count,
+        unique_count: field.unique_count,
+        sample_values: field.sample_values,
+      }),
+      field_type: field.recommended_config.field_type,
+    };
+    const recommended = field.recommended_config;
+    return {
+      ...baseField,
+      use_in_label: recommended.use_in_label ?? baseField.use_in_label,
+      missing_strategy: recommended.missing_strategy ?? baseField.missing_strategy,
+      outlier_method: recommended.outlier_method ?? baseField.outlier_method,
+      outlier_threshold: recommended.outlier_threshold ?? baseField.outlier_threshold,
+      normalization: recommended.normalization ?? baseField.normalization,
+      encoding: recommended.encoding ?? baseField.encoding,
+      ordinal_map: recommended.ordinal_map ?? baseField.ordinal_map,
+      binary_map: recommended.binary_map ?? baseField.binary_map,
+      rounding_precision: recommended.rounding_precision ?? baseField.rounding_precision,
+      datetime_format: recommended.datetime_format ?? baseField.datetime_format,
+      unit_family: recommended.unit_family ?? baseField.unit_family,
+      target_unit: recommended.target_unit ?? baseField.target_unit,
+    };
+  });
+
+  return enforceRequiredScaling(nextFields);
+}
+
+function mergeFieldsForSection(
+  appliedFields: FieldConfig[],
+  draftFields: FieldConfig[],
+  section: PrepSectionId,
+): FieldConfig[] {
+  if (section === "preview") {
+    return enforceRequiredScaling(draftFields);
+  }
+
+  const draftByKey = new Map(draftFields.map((field) => [field.key, field]));
+  const merged = appliedFields.map((field) => {
+    const draft = draftByKey.get(field.key);
+    if (!draft) return field;
+
+    if (section === "types") {
+      return {
+        ...field,
+        field_type: draft.field_type,
+        include_in_output: draft.include_in_output,
+        use_in_label: draft.use_in_label,
+        rounding_precision: draft.rounding_precision,
+        datetime_format: draft.datetime_format,
+        unit_family: draft.unit_family,
+        target_unit: draft.target_unit,
+      };
+    }
+
+    if (section === "encoding") {
+      return {
+        ...field,
+        encoding: draft.encoding,
+        ordinal_map: draft.ordinal_map,
+        binary_map: draft.binary_map,
+      };
+    }
+
+    if (section === "missing") {
+      return {
+        ...field,
+        missing_strategy: draft.missing_strategy,
+      };
+    }
+
+    if (section === "outliers") {
+      return {
+        ...field,
+        outlier_method: draft.outlier_method,
+        outlier_threshold: draft.outlier_threshold,
+      };
+    }
+
+    if (section === "scaling") {
+      return {
+        ...field,
+        normalization: draft.normalization,
+      };
+    }
+
+    return field;
+  });
+
+  return enforceRequiredScaling(merged);
 }
 
 function numericSamples(column?: PreviewColumn) {
@@ -391,15 +532,22 @@ function DistributionChart({
   values,
   bins,
   mode,
+  histogramData,
+  boxplotData,
 }: {
   title: string;
   values: number[];
   bins: number;
   mode: ChartMode;
+  histogramData?: ChartPoint[];
+  boxplotData?: { min: number; q1: number; median: number; q3: number; max: number } | null;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const histogram = useMemo(() => histogramFromValues(values, bins), [values, bins]);
-  const stats = useMemo(() => boxplotStats(values), [values]);
+  const histogram = useMemo(
+    () => (histogramData?.length ? histogramData : histogramFromValues(values, bins)),
+    [histogramData, values, bins],
+  );
+  const stats = useMemo(() => boxplotData ?? boxplotStats(values), [boxplotData, values]);
 
   if (!values.length) {
     return <p className="muted-note">Недостаточно данных для графика {title.toLowerCase()}.</p>;
@@ -900,6 +1048,7 @@ type SavedWorkflowState = {
   recommendedCriteria?: CriterionConfig[];
   weightNotes?: string[];
   fields?: FieldConfig[];
+  appliedFields?: FieldConfig[];
   criteria?: CriterionConfig[];
   analysisMode?: AnalysisMode;
   targetRowId?: string;
@@ -912,6 +1061,7 @@ type SavedWorkflowState = {
   preprocessingSection?: PrepSectionId | "selection";
   histogramBinsByField?: Record<string, number>;
   missingMatrixPreview?: Array<{ id: string; missing_count: number; missing_fields: string[] }>;
+  missingRowsPreviewData?: Array<{ id: string; values: Record<string, unknown> }>;
   correlationMatrix?: Array<{ left_key: string; right_key: string; pearson: number; samples: number }>;
   lastHistoryId?: number | null;
   profileDetailLevel?: "summary" | "detailed";
@@ -956,6 +1106,7 @@ function summaryList<T>(summary: Record<string, unknown>, key: string): T[] {
 }
 
 function buildHtmlReport(result: PipelineResult, criteria: CriterionConfig[]) {
+  const objectLabelById = new Map(result.ranking.map((item) => [item.object_id, item.title || `№${item.object_id}`]));
   const maxScore = Math.max(...result.ranking.map((item) => item.score), 0.0001);
   const rankingBars = result.ranking
     .slice(0, 10)
@@ -1012,13 +1163,13 @@ function buildHtmlReport(result: PipelineResult, criteria: CriterionConfig[]) {
     )
     .join("");
   const analogRows = summaryList<{ label: string; object_ids: string[] }>(result.analysis_summary, "analog_groups")
-    .map((group) => `<tr><td>${escapeHtml(translateAnalysisText(group.label))}</td><td>${group.object_ids.map((id) => `№${escapeHtml(id)}`).join(", ")}</td></tr>`)
+    .map((group) => `<tr><td>${escapeHtml(translateAnalysisText(group.label))}</td><td>${group.object_ids.map((id) => escapeHtml(objectLabelById.get(id) || `№${id}`)).join(", ")}</td></tr>`)
     .join("");
   const dominanceRows = summaryList<{ dominant_object_id: string; dominated_object_id: string; criteria_count: number }>(
     result.analysis_summary,
     "dominance_pairs",
   )
-    .map((item) => `<tr><td>№${escapeHtml(item.dominant_object_id)}</td><td>№${escapeHtml(item.dominated_object_id)}</td><td>${item.criteria_count}</td></tr>`)
+    .map((item) => `<tr><td>${escapeHtml(objectLabelById.get(item.dominant_object_id) || `№${item.dominant_object_id}`)}</td><td>${escapeHtml(objectLabelById.get(item.dominated_object_id) || `№${item.dominated_object_id}`)}</td><td>${item.criteria_count}</td></tr>`)
     .join("");
   return `<!doctype html>
 <html lang="ru">
@@ -1074,6 +1225,10 @@ function chartValue(item: RankedItem, mode: AnalysisMode) {
 
 function compactNumber(value: number) {
   return Number.isFinite(value) ? value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "") : "0";
+}
+
+function objectLabelFromResult(result: PipelineResult, objectId: string) {
+  return result.ranking.find((item) => item.object_id === objectId)?.title || `Объект ${objectId}`;
 }
 
 function objectValueLabel(value: unknown) {
@@ -1134,6 +1289,7 @@ function buildSortedDatasetCsv(result: PipelineResult, criteria: CriterionConfig
 
 function ResultBarChart({
   result,
+  objectLabelMap,
   mode,
   selectedId,
   onSelect,
@@ -1141,6 +1297,7 @@ function ResultBarChart({
   onPageChange,
 }: {
   result: PipelineResult;
+  objectLabelMap: Map<string, string>;
   mode: AnalysisMode;
   selectedId: string;
   onSelect: (objectId: string) => void;
@@ -1169,15 +1326,16 @@ function ResultBarChart({
         {rows.map((item) => {
           const value = chartValue(item, mode);
           const width = Math.max(3, (value / maxValue) * 100);
+          const objectLabel = objectLabelMap.get(String(item.object_id)) || objectLabelFromResult(result, item.object_id);
           return (
             <button
               className={`result-bar ${selectedId === item.object_id ? "active" : ""}`}
               key={item.object_id}
               onClick={() => onSelect(item.object_id)}
-              title={`${item.title}: ${compactNumber(value)}`}
+              title={`${objectLabel}: ${compactNumber(value)}`}
             >
               <span className="result-bar-rank">#{item.rank}</span>
-              <span className="result-bar-label">{item.title}</span>
+              <span className="result-bar-label">{objectLabel}</span>
               <span className="result-bar-track">
                 <span style={{ width: `${width}%` }} />
               </span>
@@ -1387,10 +1545,14 @@ function ContributionWaterfallChart({
 
 function ObjectDetailsPanel({
   item,
+  objectLabelMap,
+  result,
   mode,
   rawValues,
 }: {
   item?: RankedItem;
+  objectLabelMap: Map<string, string>;
+  result: PipelineResult;
   mode: AnalysisMode;
   rawValues?: Record<string, unknown> | null;
 }) {
@@ -1398,13 +1560,15 @@ function ObjectDetailsPanel({
     return <p className="muted-note">Выберите объект на Bar Chart, чтобы увидеть подробности.</p>;
   }
 
+  const objectLabel = objectLabelMap.get(String(item.object_id)) || objectLabelFromResult(result, item.object_id);
+
   return (
     <section className="analytics-card object-details-panel">
       <div className="object-modal-head">
         <div>
           <span className="section-kicker">Выбранный объект</span>
-          <h3>{item.title}</h3>
-          <p>ID: {item.object_id}</p>
+          <h3>{objectLabel}</h3>
+          <p>{objectLabel}</p>
         </div>
       </div>
 
@@ -1434,23 +1598,29 @@ function ObjectDetailsPanel({
 
       <div className="object-contributions-card">
         <span className="section-kicker">Критерии и вклады</span>
-        <div className="object-contributions-table">
-          <div className="object-contributions-head">
-            <span><LabelWithTip label="Критерий" tip="Показатель, используемый для сравнительного анализа объектов." /></span>
-            <span><LabelWithTip label="Значение" tip="Исходное наблюдаемое значение показателя для выбранного объекта." /></span>
-            <span><LabelWithTip label="Нормализованное" tip="Преобразованное значение показателя в единой шкале для сопоставимости критериев." /></span>
-            <span><LabelWithTip label="Вклад" tip={<><span>Компонент итогового балла по критерию:</span><Formula latex={"contribution_i = w_i \\cdot x_i^{norm}"} /></>} /></span>
-          </div>
-          {item.contributions.map((contribution) => (
-            <div className="object-contributions-row" key={contribution.key}>
-              <strong>{contribution.name}</strong>
-              <span title={objectValueLabel(rawValues?.[contribution.key] ?? contribution.raw_value)}>
-                {objectValueLabel(rawValues?.[contribution.key] ?? contribution.raw_value)}
-              </span>
-              <span>{compactNumber(contribution.normalized_value)}</span>
-              <span>{contribution.contribution.toFixed(3)}</span>
-            </div>
-          ))}
+        <div className="table-wrap object-contributions-table">
+          <table>
+            <thead>
+              <tr>
+                <th><LabelWithTip label="Критерий" tip="Показатель, используемый для сравнительного анализа объектов." /></th>
+                <th><LabelWithTip label="Исходное" tip="Исходное значение показателя для выбранного объекта до преобразований." /></th>
+                <th><LabelWithTip label="Преобразованное" tip="Значение показателя после предобработки: обработки единиц, пропусков, выбросов, кодирования и масштабирования." /></th>
+                <th><LabelWithTip label="Нормализованное" tip="Преобразованное значение показателя в единой шкале для сопоставимости критериев." /></th>
+                <th><LabelWithTip label="Вклад" tip={<><span>Компонент итогового балла по критерию:</span><Formula latex={"contribution_i = w_i \\cdot x_i^{norm}"} /></>} /></th>
+              </tr>
+            </thead>
+            <tbody>
+              {item.contributions.map((contribution) => (
+                <tr key={contribution.key}>
+                  <td><strong>{contribution.name}</strong></td>
+                  <td title={objectValueLabel(rawValues?.[contribution.key] ?? contribution.raw_value)}>{objectValueLabel(rawValues?.[contribution.key] ?? contribution.raw_value)}</td>
+                  <td title={objectValueLabel(contribution.transformed_value ?? contribution.raw_value)}>{objectValueLabel(contribution.transformed_value ?? contribution.raw_value)}</td>
+                  <td>{compactNumber(contribution.normalized_value)}</td>
+                  <td>{contribution.contribution.toFixed(3)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       </div>
     </section>
@@ -1496,10 +1666,14 @@ export function App() {
   const [missingMatrixPreview, setMissingMatrixPreview] = useState<Array<{ id: string; missing_count: number; missing_fields: string[] }>>(
     savedWorkflow.missingMatrixPreview ?? [],
   );
+  const [missingRowsPreviewData, setMissingRowsPreviewData] = useState<Array<{ id: string; values: Record<string, unknown> }>>(
+    savedWorkflow.missingRowsPreviewData ?? [],
+  );
   const [correlationMatrix, setCorrelationMatrix] = useState<Array<{ left_key: string; right_key: string; pearson: number; samples: number }>>(
     savedWorkflow.correlationMatrix ?? [],
   );
   const [fields, setFields] = useState<FieldConfig[]>(savedWorkflow.fields ?? []);
+  const [appliedFields, setAppliedFields] = useState<FieldConfig[]>(savedWorkflow.appliedFields ?? savedWorkflow.fields ?? []);
   const [criteria, setCriteria] = useState<CriterionConfig[]>(savedWorkflow.criteria ?? []);
   const [analysisMode, setAnalysisMode] = useState<AnalysisMode>(savedWorkflow.analysisMode ?? "analog_search");
   const [targetRowId, setTargetRowId] = useState(savedWorkflow.targetRowId ?? "");
@@ -1558,19 +1732,37 @@ export function App() {
       .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))[0] ?? null;
   }, [history, activeProjectId]);
   const missingRowsPreview = useMemo(() => {
+    if (missingRowsPreviewData.length) return missingRowsPreviewData;
     const rows = preview?.normalized_dataset?.rows ?? [];
     if (!rows.length || !missingMatrixPreview.length) return [];
     const ids = new Set(missingMatrixPreview.map((item) => item.id));
     return rows.filter((row) => ids.has(row.id)).slice(0, 14);
-  }, [preview, missingMatrixPreview]);
+  }, [preview, missingMatrixPreview, missingRowsPreviewData]);
   const transformedPreviewRows = useMemo(
     () => (preview?.normalized_dataset?.rows ?? []).slice(0, 40),
     [preview],
   );
   const objectLabelMap = useMemo(() => {
     const rows = preview?.normalized_dataset?.rows ?? [];
-    return new Map(rows.map((row) => [row.id, buildObjectLabel(row, fields)]));
-  }, [preview, fields]);
+    return new Map(rows.map((row) => [String(row.id), buildObjectLabel(row, appliedFields)]));
+  }, [preview, appliedFields]);
+  const displayResult = useMemo(() => {
+    if (!result) return null;
+    return {
+      ...result,
+      ranking: result.ranking.map((item) => {
+        const rawLabel = buildObjectLabelFromValues(item.object_id, rawResultValuesById[item.object_id], appliedFields);
+        return {
+          ...item,
+          title: rawLabel || objectLabelMap.get(String(item.object_id)) || item.title || `Объект ${item.object_id}`,
+        };
+      }),
+    };
+  }, [result, rawResultValuesById, appliedFields, objectLabelMap]);
+  const selectedDisplayResult = useMemo(
+    () => displayResult?.ranking.find((item) => item.object_id === selectedResultId) ?? displayResult?.ranking[0],
+    [displayResult, selectedResultId],
+  );
   const encodingPreview = rawPreview ?? preview;
   const geoLatitudeKey = useMemo(() => findGeoFieldKey(fields, "geo_latitude"), [fields]);
   const geoLongitudeKey = useMemo(() => findGeoFieldKey(fields, "geo_longitude"), [fields]);
@@ -1628,6 +1820,7 @@ export function App() {
     nextRecommendedWeights: Record<string, number>,
     nextWeightNotes: string[],
     nextMissingMatrixPreview: Array<{ id: string; missing_count: number; missing_fields: string[] }>,
+    nextMissingRowsPreviewData: Array<{ id: string; values: Record<string, unknown> }>,
     nextCorrelationMatrix: Array<{ left_key: string; right_key: string; pearson: number; samples: number }>,
     nextDetailLevel: "summary" | "detailed",
   ) {
@@ -1636,6 +1829,7 @@ export function App() {
     setRecommendedWeights(nextRecommendedWeights);
     setWeightNotes(nextWeightNotes);
     setMissingMatrixPreview(nextMissingMatrixPreview);
+    setMissingRowsPreviewData(nextMissingRowsPreviewData);
     setCorrelationMatrix(nextCorrelationMatrix);
     setProfileDetailLevel(nextDetailLevel);
   }
@@ -1651,22 +1845,44 @@ export function App() {
     }
   }
 
-  async function loadDetailedStoredProfile(nextDatasetFileId: number, nextFilename: string, nextFields?: FieldConfig[]) {
+  async function hydratePreprocessingStateFromStoredProfile(
+    nextDatasetFileId: number,
+    nextFilename: string,
+    histogramSeed: Record<string, number> = {},
+    resetTargetRow = false,
+  ) {
     setProfileDetailsLoading(true);
     try {
       const response = await fetchStoredProfile(nextDatasetFileId, nextFilename, {
-        histogramBinsByField: histogramBinsForRefresh,
+        histogramBinsByField: histogramSeed,
         detailLevel: "detailed",
       });
+      const nextFields = buildInitialFields(response.preview, response.profile.fields);
+      const nextHistogramBinsByField = Object.fromEntries(
+        nextFields
+          .filter((field) => isNumericFieldType(field.field_type))
+          .map((field) => [field.key, Math.min(64, Math.max(2, histogramSeed[field.key] ?? 8))]),
+      );
+
+      setRawPreview(response.preview);
+      setPreview(response.preview);
       applyProfileSnapshot(
         response.profile.fields,
         response.profile.quality,
         response.profile.recommended_weights,
         response.profile.weight_notes,
         response.profile.missing_matrix_preview ?? [],
+        response.profile.missing_rows_preview ?? [],
         response.profile.correlation_matrix ?? [],
-        "detailed",
+        response.profile.detail_level === "detailed" ? "detailed" : "summary",
       );
+      setFields(nextFields);
+      setHistogramBinsByField(nextHistogramBinsByField);
+      setHistogramDraftBinsByField(nextHistogramBinsByField);
+      setChartModeByField({});
+      if (resetTargetRow || !targetRowId) {
+        setTargetRowId(response.preview.normalized_dataset?.rows?.[0]?.id ?? "");
+      }
     } catch (detailsError) {
       console.error(detailsError);
     } finally {
@@ -1757,6 +1973,7 @@ export function App() {
     setRecommendedWeights({});
     setWeightNotes([]);
     setMissingMatrixPreview([]);
+    setMissingRowsPreviewData([]);
     setCorrelationMatrix([]);
     setFields([]);
     setCriteria([]);
@@ -1781,6 +1998,40 @@ export function App() {
     setReportPreviewOpen(false);
     setError(null);
     localStorage.removeItem(WORKFLOW_STORAGE_KEY);
+  }
+
+  async function resetPreprocessing() {
+    if (!datasetFileId || !sourceFilename) return;
+
+    setLoading(true);
+    setError(null);
+    setRawPreview(null);
+    setPreview(null);
+    setProfile([]);
+    setQuality(null);
+    setRecommendedWeights({});
+    setWeightNotes([]);
+    setMissingMatrixPreview([]);
+    setMissingRowsPreviewData([]);
+    setCorrelationMatrix([]);
+    setCriteria([]);
+    setResult(null);
+    setSelectedResultId("");
+    setRawResultValuesById({});
+    setResultsPage(1);
+    setLastHistoryId(null);
+    setPreprocessingSection("types");
+    setFields([]);
+    setTargetRowId("");
+    setGeoRadiusKm(null);
+    setHistogramBinsByField({});
+    setHistogramDraftBinsByField({});
+    setChartModeByField({});
+    try {
+      await hydratePreprocessingStateFromStoredProfile(datasetFileId, sourceFilename, {}, true);
+    } finally {
+      setLoading(false);
+    }
   }
 
   function openUserSection(stage: StageId) {
@@ -1849,6 +2100,38 @@ export function App() {
   }, [result, selectedResultId]);
 
   useEffect(() => {
+    if (!datasetFileId || !result?.ranking.length) return;
+
+    const pageStart = Math.max(0, (resultsPage - 1) * 8);
+    const pageObjectIds = result.ranking
+      .slice(pageStart, pageStart + 8)
+      .map((item) => item.object_id)
+      .filter((objectId) => !rawResultValuesById[objectId]);
+
+    if (!pageObjectIds.length) return;
+
+    let cancelled = false;
+
+    void fetchRawObjects(datasetFileId, pageObjectIds, sourceFilename || preview?.filename || undefined)
+      .then((response: RawObjectsResponse) => {
+        if (cancelled || !response?.objects) return;
+        setRawResultValuesById((current) => ({
+          ...current,
+          ...response.objects,
+        }));
+      })
+      .catch((rawError) => {
+        if (!cancelled) {
+          console.error(rawError);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [datasetFileId, result, resultsPage, sourceFilename, preview, rawResultValuesById]);
+
+  useEffect(() => {
     if (!datasetFileId || !selectedResult?.object_id) return;
     if (rawResultValuesById[selectedResult.object_id]) return;
 
@@ -1885,39 +2168,14 @@ export function App() {
     if (activeStage !== "preprocessing") return;
     if (!preview) return;
     if (!fields.length) {
-      const nextFields = profile.length
-        ? profile.map((field) => ({
-            ...field.recommended_config,
-            use_in_label: field.recommended_config.use_in_label ?? looksLikeLabelField({
-              source_name: field.key,
-              normalized_name: field.key,
-              inferred_type: field.inferred_type,
-              missing_count: field.missing_count,
-              unique_count: field.unique_count,
-              sample_values: field.sample_values,
-            }),
-            missing_strategy: "none",
-            outlier_method: "none",
-            normalization: isNumericFieldType(field.recommended_config.field_type) ? "minmax" : "none",
-          }))
-        : preview.columns.map((column) => fieldDefaults(column));
-      setFields(enforceRequiredScaling(nextFields));
-      const nextHistogramBinsByField = Object.fromEntries(
-        nextFields
-          .filter((field) => isNumericFieldType(field.field_type))
-          .map((field) => [field.key, Math.min(64, Math.max(2, histogramBinsByField[field.key] ?? 8))]),
-      );
-      setHistogramBinsByField(nextHistogramBinsByField);
-      setHistogramDraftBinsByField(nextHistogramBinsByField);
-      setChartModeByField({});
-      if (!targetRowId) {
-        setTargetRowId(preview.normalized_dataset?.rows?.[0]?.id ?? "");
+      if (datasetFileId && sourceFilename) {
+        void hydratePreprocessingStateFromStoredProfile(datasetFileId, sourceFilename, histogramBinsByField);
       }
       return;
     }
     if (!datasetFileId || !sourceFilename) return;
     if (profileDetailLevel === "detailed" || profileDetailsLoading) return;
-    void loadDetailedStoredProfile(datasetFileId, sourceFilename);
+    void hydratePreprocessingStateFromStoredProfile(datasetFileId, sourceFilename, histogramBinsByField);
   }, [activeStage, datasetFileId, sourceFilename, profileDetailLevel, profileDetailsLoading, preview, fields, profile, histogramBinsByField, targetRowId]);
 
   useEffect(() => {
@@ -1981,6 +2239,7 @@ export function App() {
       recommendedWeights,
       weightNotes,
       missingMatrixPreview,
+      missingRowsPreviewData,
       correlationMatrix,
       fields,
       criteria,
@@ -2011,6 +2270,7 @@ export function App() {
         recommendedWeights,
         weightNotes,
         missingMatrixPreview,
+        missingRowsPreviewData,
         correlationMatrix,
         fields,
         criteria,
@@ -2043,6 +2303,7 @@ export function App() {
     recommendedWeights,
     weightNotes,
     missingMatrixPreview,
+    missingRowsPreviewData,
     correlationMatrix,
     fields,
     criteria,
@@ -2133,6 +2394,7 @@ export function App() {
       setRecommendedWeights({});
       setWeightNotes([]);
       setMissingMatrixPreview([]);
+      setMissingRowsPreviewData([]);
       setCorrelationMatrix([]);
       setFields([]);
       setCriteria([]);
@@ -2162,6 +2424,7 @@ export function App() {
         setRecommendedWeights({});
         setWeightNotes([]);
         setMissingMatrixPreview([]);
+        setMissingRowsPreviewData([]);
         setCorrelationMatrix([]);
         setFields([]);
         setCriteria([]);
@@ -2213,6 +2476,7 @@ export function App() {
         setRecommendedWeights(response.profile.recommended_weights);
         setWeightNotes(response.profile.weight_notes);
         setMissingMatrixPreview(response.profile.missing_matrix_preview ?? []);
+        setMissingRowsPreviewData(response.profile.missing_rows_preview ?? []);
         setCorrelationMatrix(response.profile.correlation_matrix ?? []);
         setHistogramBinsByField(nextHistogramBinsByField);
         setHistogramDraftBinsByField(nextHistogramBinsByField);
@@ -2225,6 +2489,7 @@ export function App() {
         setRecommendedWeights({});
         setWeightNotes([]);
         setMissingMatrixPreview([]);
+        setMissingRowsPreviewData([]);
         setCorrelationMatrix([]);
         setHistogramBinsByField({});
         setHistogramDraftBinsByField({});
@@ -2295,6 +2560,7 @@ export function App() {
       setRecommendedWeights({});
       setWeightNotes([]);
       setMissingMatrixPreview([]);
+      setMissingRowsPreviewData([]);
       setCorrelationMatrix([]);
       setProfileDetailLevel("summary");
       setFields([]);
@@ -2387,6 +2653,7 @@ export function App() {
         response.profile.recommended_weights,
         response.profile.weight_notes,
         response.profile.missing_matrix_preview ?? [],
+        response.profile.missing_rows_preview ?? [],
         response.profile.correlation_matrix ?? [],
         response.profile.detail_level === "detailed" ? "detailed" : "summary",
       );
@@ -2403,6 +2670,7 @@ export function App() {
             detailedResponse.profile.recommended_weights,
             detailedResponse.profile.weight_notes,
             detailedResponse.profile.missing_matrix_preview ?? [],
+            detailedResponse.profile.missing_rows_preview ?? [],
             detailedResponse.profile.correlation_matrix ?? [],
             detailedResponse.profile.detail_level === "detailed" ? "detailed" : "summary",
           );
@@ -2869,8 +3137,8 @@ export function App() {
                   </div>
                   <button onClick={() => setActiveStage("preprocessing")}>Перейти к подготовке</button>
                 </div>
-                <div className="table-wrap compact">
-                  <table>
+                <div className="table-wrap schema-table-wrap">
+                  <table className="schema-table">
                     <thead>
                       <tr>
                         <th>Поле</th>
@@ -2905,7 +3173,12 @@ export function App() {
                 <span className="section-kicker">Этап 2</span>
                 <h2>Подготовка данных</h2>
               </div>
-              <button onClick={rebuildCriteria} disabled={fields.length === 0}>Сформировать критерии</button>
+              <div className="panel-head-actions">
+                <button type="button" className="ghost-button" onClick={resetPreprocessing} disabled={loading || fields.length === 0}>
+                  Сбросить подготовку
+                </button>
+                <button onClick={rebuildCriteria} disabled={fields.length === 0}>Сформировать критерии</button>
+              </div>
             </div>
 
             {fields.length > 0 ? (
@@ -3021,6 +3294,10 @@ export function App() {
                             const column = preview?.columns.find((item) => item.normalized_name === field.key);
                             const fieldProfile = profile.find((item) => item.key === field.key);
                             const detectedDateFormat = fieldProfile?.recommended_config.datetime_format ?? "YYYY-MM-DD";
+                            const detectedUnitFamily = fieldProfile?.detected_unit_family ?? field.unit_family ?? null;
+                            const detectedUnits = fieldProfile?.detected_units ?? [];
+                            const unitOptions = getUnitOptions(detectedUnitFamily);
+                            const selectedTargetUnit = field.target_unit ?? fieldProfile?.target_unit ?? "";
                             return (
                               <tr key={field.key}>
                                 <td>{field.key}</td>
@@ -3068,6 +3345,24 @@ export function App() {
                                         />
                                       </label>
                                     ) : null}
+                                    {isNumericFieldType(field.field_type) && unitOptions.length ? (
+                                      <label className="sub-control" style={{ flex: "0 0 180px" }}>
+                                        <span>Единицы</span>
+                                        <select
+                                          value={selectedTargetUnit}
+                                          onChange={(event) =>
+                                            updateField(index, {
+                                              unit_family: detectedUnitFamily,
+                                              target_unit: event.target.value || null,
+                                            })
+                                          }
+                                        >
+                                          {unitOptions.map((option) => (
+                                            <option key={option.value} value={option.value}>{option.label}</option>
+                                          ))}
+                                        </select>
+                                      </label>
+                                    ) : null}
                                     {field.field_type === "datetime" ? (
                                       <label className="sub-control" style={{ flex: "0 0 180px" }}>
                                         <span>Формат даты</span>
@@ -3083,6 +3378,9 @@ export function App() {
                                     ) : null}
                                     </div>
                                     {field.field_type === "datetime" ? <small>Автоопределено: {detectedDateFormat}</small> : null}
+                                    {isNumericFieldType(field.field_type) && detectedUnits.length ? (
+                                      <small>Найдены единицы: {detectedUnits.join(", ")}</small>
+                                    ) : null}
                                   </div>
                                 </td>
                                 <td>
@@ -3407,7 +3705,13 @@ export function App() {
                                   </button>
                                 </div>
                               </div>
-                              <DistributionChart title={`Распределение ${field.key}`} values={values} bins={appliedBins} mode={currentMode} />
+                              <DistributionChart
+                                title={`Распределение ${field.key}`}
+                                values={values}
+                                bins={appliedBins}
+                                mode={currentMode}
+                                boxplotData={fieldProfile?.boxplot_stats ?? null}
+                              />
                               <div className="control-grid">
                                 {currentMode === "histogram" ? (
                                   <label>
@@ -3470,6 +3774,8 @@ export function App() {
                   </>
                 ) : null}
               </>
+            ) : datasetFileId && sourceFilename ? (
+              <div className="empty-state">Загружаем настройки подготовки...</div>
             ) : (
               <div className="empty-state">Сначала загрузите файл.</div>
             )}
@@ -3633,10 +3939,12 @@ export function App() {
                 </div>
               </div>
 
-              {result ? (
-                <>
+               {displayResult ? (() => {
+                 const objectLabelById = new Map(displayResult.ranking.map((item) => [String(item.object_id), item.title || `Объект ${item.object_id}`]));
+                 return (
+                 <>
                   <div className="metric-row">
-                    {summaryCardEntries(result.analysis_summary).filter(([key]) => key !== "weights_sum").map(([key, value]) => (
+                    {summaryCardEntries(displayResult.analysis_summary).filter(([key]) => key !== "weights_sum").map(([key, value]) => (
                       <div className="metric" key={key}>
                         <span>{summaryHelpText(key) ? <LabelWithTip label={labelForSummaryKey(key)} tip={summaryHelpText(key)} /> : labelForSummaryKey(key)}</span>
                         <strong>{formatSummaryValue(key, value)}</strong>
@@ -3647,24 +3955,24 @@ export function App() {
                     <div className="insight-card">
                       <span className="section-kicker">Надежность</span>
                       <h3>Доверие и устойчивость</h3>
-                      <p>{translateAnalysisText(result.analysis_summary.ranking_stability_note ?? "Нет данных об устойчивости рейтинга.")}</p>
-                      {summaryList<RankingStabilityScenario>(result.analysis_summary, "ranking_stability_scenarios").map((scenario) => (
+                      <p>{translateAnalysisText(displayResult.analysis_summary.ranking_stability_note ?? "Нет данных об устойчивости рейтинга.")}</p>
+                      {summaryList<RankingStabilityScenario>(displayResult.analysis_summary, "ranking_stability_scenarios").map((scenario) => (
                         <div className="stability-row" key={scenario.label}>
                           <strong>{scenario.label}</strong>
-                          <span>Лидер: {scenario.top_object_id ?? "-"}</span>
+                           <span>Лидер: {scenario.top_object_id ? objectLabelById.get(String(scenario.top_object_id)) || `№${scenario.top_object_id}` : "-"}</span>
                           <span>Совпадение топ-N: {scenario.top_n_overlap}</span>
                           <small>{translateAnalysisText(scenario.note)}</small>
                         </div>
                       ))}
-                      {summaryList<string>(result.analysis_summary, "confidence_notes").map((item, index) => (
+                      {summaryList<string>(displayResult.analysis_summary, "confidence_notes").map((item, index) => (
                         <p key={`${item}-${index}`}>{translateAnalysisText(item)}</p>
                       ))}
                     </div>
                     <div className="insight-card">
                       <span className="section-kicker">Аналоги</span>
                       <h3>Группы аналогов</h3>
-                      {summaryList<{ label: string; object_ids: string[] }>(result.analysis_summary, "analog_groups").length ? (
-                        summaryList<{ label: string; object_ids: string[] }>(result.analysis_summary, "analog_groups").map((group) => (
+                      {summaryList<{ label: string; object_ids: string[] }>(displayResult.analysis_summary, "analog_groups").length ? (
+                        summaryList<{ label: string; object_ids: string[] }>(displayResult.analysis_summary, "analog_groups").map((group) => (
                           <div className="group-chip" key={group.label}>
                             <strong>{translateAnalysisText(group.label)}</strong>
                             <span>{group.object_ids.length} Объектов</span>
@@ -3677,29 +3985,33 @@ export function App() {
                   </div>
                   <div className="analytics-grid">
                     <ResultBarChart
-                      result={result}
+                      result={displayResult}
+                      objectLabelMap={objectLabelMap}
                       mode={analysisMode}
-                      selectedId={selectedResult?.object_id ?? ""}
+                      selectedId={selectedDisplayResult?.object_id ?? ""}
                       onSelect={setSelectedResultId}
                       currentPage={resultsPage}
                       onPageChange={changeResultsPage}
                     />
                     <RadarComparisonChart
-                      item={selectedResult}
-                      baseline={result.ranking[0]}
+                      item={selectedDisplayResult}
+                      baseline={displayResult.ranking[0]}
                     />
                     <ContributionWaterfallChart
-                      item={selectedResult}
+                      item={selectedDisplayResult}
                       mode={analysisMode}
                     />
                   </div>
                   <ObjectDetailsPanel
-                    item={selectedResult}
+                    item={selectedDisplayResult}
+                    objectLabelMap={objectLabelMap}
+                    result={displayResult}
                     mode={analysisMode}
-                    rawValues={selectedResult ? rawResultValuesById[selectedResult.object_id] ?? null : null}
+                    rawValues={selectedDisplayResult ? rawResultValuesById[selectedDisplayResult.object_id] ?? null : null}
                   />
-                </>
-              ) : (
+                 </>
+                 );
+               })() : (
                 <div className="empty-state">
                   Расчет еще не выполнен. Перейдите к критериям и запустите анализ.
                 </div>

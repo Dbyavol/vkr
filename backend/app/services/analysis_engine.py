@@ -116,18 +116,22 @@ def _apply_filters(payload: AnalysisRequest) -> list[Any]:
     return filtered
 
 
-def _build_objects_frame(objects: list[Any], criteria: list[CriterionConfig]) -> tuple[pd.DataFrame, dict[str, str]]:
+def _build_objects_frame(
+    objects: list[Any], criteria: list[CriterionConfig]
+) -> tuple[pd.DataFrame, dict[str, str], dict[str, dict[str, Any]]]:
     records: list[dict[str, Any]] = []
     title_by_id: dict[str, str] = {}
+    transformed_by_id: dict[str, dict[str, Any]] = {}
     for obj in objects:
         object_id = str(obj.id)
         title_by_id[object_id] = obj.title
+        transformed_by_id[object_id] = dict(obj.transformed_attributes or {})
         record = {"__id": object_id, "__title": obj.title}
         for criterion in criteria:
             record[criterion.key] = obj.attributes.get(criterion.key)
         records.append(record)
     frame = pd.DataFrame(records).set_index("__id", drop=True)
-    return frame, title_by_id
+    return frame, title_by_id, transformed_by_id
 
 
 def _prepare_criteria_frame(
@@ -403,6 +407,7 @@ def _confidence(
 def _build_ranking(
     *,
     frame: pd.DataFrame,
+    transformed_by_id: dict[str, dict[str, Any]],
     normalized_df: pd.DataFrame,
     notes_df: pd.DataFrame,
     score_series: pd.Series,
@@ -433,6 +438,7 @@ def _build_ranking(
         for criterion in criteria:
             key = criterion.key
             raw_value = frame.at[object_id, key]
+            transformed_value = transformed_by_id.get(str(object_id), {}).get(key)
             note = notes_df.at[object_id, key] if key in notes_df.columns else None
             normalized_value = float(normalized_df.at[object_id, key]) if key in normalized_df.columns else 0.0
             weight = float(weights.get(key, 0.0))
@@ -442,6 +448,7 @@ def _build_ranking(
                     key=key,
                     name=criterion.name,
                     raw_value=None if pd.isna(raw_value) else raw_value,
+                    transformed_value=None if pd.isna(transformed_value) else transformed_value,
                     normalized_value=round(normalized_value, 4),
                     weight=round(weight, 4),
                     contribution=contribution,
@@ -484,7 +491,7 @@ def run_comparative_analysis(payload: AnalysisRequest) -> AnalysisResponse:
         raise ValueError("После применения фильтров не осталось объектов для анализа")
 
     normalized_weights, notes = _weights(payload.criteria, payload.auto_normalize_weights)
-    frame, _ = _build_objects_frame(objects, payload.criteria)
+    frame, _, transformed_by_id = _build_objects_frame(objects, payload.criteria)
     prepared_df, notes_df = _prepare_criteria_frame(frame, payload.criteria)
     score_series, similarity_series = _score_frame(
         prepared_df=prepared_df,
@@ -494,6 +501,7 @@ def run_comparative_analysis(payload: AnalysisRequest) -> AnalysisResponse:
     )
     rows, ranked_ids = _build_ranking(
         frame=frame,
+        transformed_by_id=transformed_by_id,
         normalized_df=prepared_df,
         notes_df=notes_df,
         score_series=score_series,

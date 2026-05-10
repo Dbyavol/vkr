@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from app.services.measurement_parsing import coerce_measurement_series
 from app.schemas.preprocessing import (
     FieldConfig,
     FieldReport,
@@ -65,7 +66,7 @@ def _to_datetime(value: Any, preferred_format: str | None = None) -> datetime | 
 
 def _as_numeric(series: pd.Series) -> pd.Series:
     normalized = series.replace({True: 1.0, False: 0.0})
-    return pd.to_numeric(normalized, errors="coerce")
+    return coerce_measurement_series(normalized, field_key=series.name or "value").series
 
 
 def _missing_mask(series: pd.Series) -> pd.Series:
@@ -156,6 +157,7 @@ def preprocess_rows(
     generated_columns: list[str] = []
     generated_column_set: set[str] = set()
     field_configs = {field.key: field for field in field_models}
+    pre_normalized_snapshots: dict[str, pd.Series] = {}
 
     for config in field_models:
         if config.key not in df.columns:
@@ -173,6 +175,16 @@ def preprocess_rows(
             normalization_applied=config.normalization,
             notes=[],
         )
+
+        if _is_numeric_field(config.field_type) and not df.empty:
+            measurement_result = coerce_measurement_series(
+                df[config.key],
+                field_key=config.key,
+                preferred_target_unit=config.target_unit,
+            )
+            df[config.key] = measurement_result.series
+            if measurement_result.note:
+                report.notes.append(measurement_result.note)
 
         missing_mask = _missing_mask(df[config.key])
         removed_missing = 0
@@ -278,6 +290,16 @@ def preprocess_rows(
                             generated_columns.append(column)
             report.notes.append("One-hot encoding applied")
 
+        if config.field_type == "float" and config.rounding_precision is not None and config.key in df.columns and not df.empty:
+            numeric = _as_numeric(df[config.key])
+            if numeric.notna().any():
+                rounded = numeric.round(config.rounding_precision)
+                df[config.key] = rounded.where(numeric.notna(), df[config.key])
+                report.notes.append(f"Float values rounded to {config.rounding_precision} decimal places")
+
+        if config.key in df.columns:
+            pre_normalized_snapshots[config.key] = df[config.key].copy()
+
         if config.normalization != "none" and _is_numeric_field(config.field_type) and not df.empty:
             numeric = _as_numeric(df[config.key])
             if numeric.notna().any():
@@ -286,13 +308,6 @@ def preprocess_rows(
                 report.notes.append(f"Normalization applied: {config.normalization}")
             else:
                 report.notes.append("Normalization skipped due to missing numeric values")
-
-        if config.field_type == "float" and config.rounding_precision is not None and config.key in df.columns and not df.empty:
-            numeric = _as_numeric(df[config.key])
-            if numeric.notna().any():
-                rounded = numeric.round(config.rounding_precision)
-                df[config.key] = rounded.where(numeric.notna(), df[config.key])
-                report.notes.append(f"Float values rounded to {config.rounding_precision} decimal places")
 
         report.rows_missing_after = int(_missing_mask(df[config.key]).sum()) if config.key in df.columns else 0
         report.rows_removed_as_outliers = removed_outliers
@@ -312,7 +327,17 @@ def preprocess_rows(
             output_columns.remove(config.key)
 
     selected = df[["__id", *output_columns]].replace({np.nan: None, pd.NA: None})
+    pre_normalized_selected = pd.DataFrame({"__id": df["__id"]})
+    for column in output_columns:
+        source_series = pre_normalized_snapshots.get(column, df[column] if column in df.columns else pd.Series(dtype="object"))
+        pre_normalized_selected[column] = source_series
+    pre_normalized_selected = pre_normalized_selected.replace({np.nan: None, pd.NA: None})
     records = selected.to_dict(orient="records")
+    pre_normalized_records = pre_normalized_selected.to_dict(orient="records")
+    pre_normalized_by_id = {
+        str(record.get("__id")): {key: value for key, value in record.items() if key != "__id"}
+        for record in pre_normalized_records
+    }
     output_rows = [
         {
             "id": str(record.pop("__id")),
@@ -320,6 +345,7 @@ def preprocess_rows(
             "original_values": deepcopy(original_values_by_id.get(str(record_id)))
             if preserve_original_values
             else None,
+            "pre_normalized_values": deepcopy(pre_normalized_by_id.get(str(record_id))) if pre_normalized_by_id.get(str(record_id)) else None,
         }
         for record_id, record in ((row["__id"], row) for row in records)
     ]

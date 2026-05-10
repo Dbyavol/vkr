@@ -34,6 +34,8 @@ class FieldConfig(BaseModel):
     encoding: EncodingMethod = "none"
     rounding_precision: int | None = None
     datetime_format: str | None = None
+    unit_family: str | None = None
+    target_unit: str | None = None
     ordinal_map: dict[str, float] | None = None
     binary_map: dict[str, float] | None = None
 
@@ -87,6 +89,7 @@ class ProcessedRow(BaseModel):
     id: str
     values: dict[str, Any]
     original_values: dict[str, Any] | None = None
+    pre_normalized_values: dict[str, Any] | None = None
 
 
 class PreprocessingSummary(BaseModel):
@@ -109,6 +112,14 @@ class ChartPoint(BaseModel):
     value: float
 
 
+class BoxplotStats(BaseModel):
+    min: float
+    q1: float
+    median: float
+    q3: float
+    max: float
+
+
 class FieldRecommendation(BaseModel):
     code: str
     severity: str
@@ -120,6 +131,9 @@ class FieldProfile(BaseModel):
     key: str
     inferred_type: FieldType
     analytic_candidate: bool
+    detected_unit_family: str | None = None
+    detected_units: list[str] = Field(default_factory=list)
+    target_unit: str | None = None
     rows_total: int
     missing_count: int
     unique_count: int
@@ -131,6 +145,7 @@ class FieldProfile(BaseModel):
     numeric_median: float | None = None
     outlier_count_iqr: int = 0
     histogram: list[ChartPoint] = Field(default_factory=list)
+    boxplot_stats: BoxplotStats | None = None
     top_categories: list[ChartPoint] = Field(default_factory=list)
     text_to_categorical_possible: bool = False
     recommended_config: FieldConfig
@@ -174,4 +189,5 @@ class DatasetProfileResponse(BaseModel):
     recommended_weights: dict[str, float] = Field(default_factory=dict)
     weight_notes: list[str] = Field(default_factory=list)
     missing_matrix_preview: list[dict[str, Any]] = Field(default_factory=list)
+    missing_rows_preview: list[DatasetRow] = Field(default_factory=list)
     correlation_matrix: list[dict[str, Any]] = Field(default_factory=list)

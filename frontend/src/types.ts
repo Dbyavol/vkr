@@ -29,6 +29,14 @@ export type ChartPoint = {
   value: number;
 };
 
+export type BoxplotStats = {
+  min: number;
+  q1: number;
+  median: number;
+  q3: number;
+  max: number;
+};
+
 export type FieldRecommendation = {
   code: string;
   severity: "info" | "warning" | "critical" | string;
@@ -40,6 +48,9 @@ export type FieldProfile = {
   key: string;
   inferred_type: InferredType;
   analytic_candidate: boolean;
+  detected_unit_family?: string | null;
+  detected_units?: string[];
+  target_unit?: string | null;
   rows_total: number;
   missing_count: number;
   unique_count: number;
@@ -51,6 +62,7 @@ export type FieldProfile = {
   numeric_median: number | null;
   outlier_count_iqr: number;
   histogram: ChartPoint[];
+  boxplot_stats?: BoxplotStats | null;
   top_categories: ChartPoint[];
   text_to_categorical_possible: boolean;
   recommended_config: FieldConfig;
@@ -90,6 +102,10 @@ export type DatasetProfileResponse = {
     missing_count: number;
     missing_fields: string[];
   }>;
+  missing_rows_preview: Array<{
+    id: string;
+    values: Record<string, unknown>;
+  }>;
   correlation_matrix: Array<{
     left_key: string;
     right_key: string;
@@ -128,6 +144,8 @@ export type FieldConfig = {
   encoding: string;
   rounding_precision?: number | null;
   datetime_format?: string | null;
+  unit_family?: string | null;
+  target_unit?: string | null;
   ordinal_map?: Record<string, number>;
   binary_map?: Record<string, number>;
 };
@@ -179,6 +197,7 @@ export type PipelineResult = {
       key: string;
       name: string;
       raw_value: unknown;
+      transformed_value?: unknown | null;
       normalized_value: number;
       weight: number;
       contribution: number;

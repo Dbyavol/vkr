@@ -82,3 +82,62 @@ def test_preprocessing_rounds_float_field():
 
     assert result.dataset[0].values["ratio"] == 1.23
     assert result.dataset[1].values["ratio"] == 2.35
+
+
+def test_preprocessing_extracts_numeric_values_with_units():
+    payload = PreprocessingRequest(
+        dataset=DatasetPayload(
+            rows=[
+                DatasetRow(id="1", values={"kmDriven": "98,000 km"}),
+                DatasetRow(id="2", values={"kmDriven": "190000.0 km"}),
+            ]
+        ),
+        fields=[FieldConfig(key="kmDriven", field_type="integer")],
+    )
+
+    result = preprocess_dataset(payload)
+
+    assert result.dataset[0].values["kmDriven"] == 98000.0
+    assert result.dataset[1].values["kmDriven"] == 190000.0
+    assert any("Embedded units detected" in note for note in result.field_reports[0].notes)
+
+
+def test_preprocessing_converts_mixed_distance_units_to_target_unit():
+    payload = PreprocessingRequest(
+        dataset=DatasetPayload(
+            rows=[
+                DatasetRow(id="1", values={"distance": "10 km"}),
+                DatasetRow(id="2", values={"distance": "5 mi"}),
+            ]
+        ),
+        fields=[FieldConfig(key="distance", field_type="float", target_unit="km")],
+    )
+
+    result = preprocess_dataset(payload)
+
+    assert result.dataset[0].values["distance"] == 10.0
+    assert round(float(result.dataset[1].values["distance"]), 3) == 8.047
+
+
+def test_preprocessing_keeps_pre_normalized_values_before_scaling():
+    payload = PreprocessingRequest(
+        dataset=DatasetPayload(
+            rows=[
+                DatasetRow(id="1", values={"year": "2003", "kmDriven": "98,000 km", "ratio": 1.23456}),
+                DatasetRow(id="2", values={"year": "2005", "kmDriven": "190000.0 km", "ratio": 2.34567}),
+            ]
+        ),
+        fields=[
+            FieldConfig(key="year", field_type="integer", normalization="minmax"),
+            FieldConfig(key="kmDriven", field_type="integer", normalization="minmax"),
+            FieldConfig(key="ratio", field_type="float", normalization="minmax", rounding_precision=2),
+        ],
+    )
+
+    result = preprocess_dataset(payload)
+
+    assert result.dataset[0].pre_normalized_values["year"] == 2003.0
+    assert result.dataset[0].pre_normalized_values["kmDriven"] == 98000.0
+    assert result.dataset[0].pre_normalized_values["ratio"] == 1.23
+    assert result.dataset[0].values["year"] == 0.0
+    assert result.dataset[0].values["kmDriven"] == 0.0

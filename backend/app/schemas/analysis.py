@@ -12,6 +12,7 @@ class DatasetObject(BaseModel):
     id: str
     title: str
     attributes: dict[str, Any]
+    transformed_attributes: dict[str, Any] | None = None
 
 
 class CriterionConfig(BaseModel):
@@ -89,6 +90,7 @@ class CriterionContribution(BaseModel):
     key: str
     name: str
     raw_value: Any
+    transformed_value: Any | None = None
     normalized_value: float
     weight: float
     contribution: float

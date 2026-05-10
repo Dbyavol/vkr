@@ -46,3 +46,43 @@ def test_analysis_engine_supports_analog_search():
     assert result.summary.mode == "analog_search"
     assert result.ranking[0].object_id == "2"
     assert all(item.object_id != "1" for item in result.ranking)
+
+
+def test_analysis_engine_returns_transformed_values_before_scaling():
+    payload = AnalysisRequest(
+        dataset=AnalysisDataset(
+            objects=[
+                DatasetObject(
+                    id="1",
+                    title="A",
+                    attributes={"price": 0.0, "distance": 1.0},
+                    transformed_attributes={"price": 125000.0, "distance": 102300.0},
+                ),
+                DatasetObject(
+                    id="2",
+                    title="B",
+                    attributes={"price": 1.0, "distance": 0.0},
+                    transformed_attributes={"price": 225000.0, "distance": 50000.0},
+                ),
+            ]
+        ),
+        criteria=[
+            CriterionConfig(key="price", name="Цена", weight=0.5, type="numeric", direction="maximize"),
+            CriterionConfig(key="distance", name="Пробег", weight=0.5, type="numeric", direction="maximize"),
+        ],
+    )
+
+    result = run_comparative_analysis(payload)
+    ranked_by_id = {item.object_id: item for item in result.ranking}
+    first_object_contributions = {item.key: item for item in ranked_by_id["1"].contributions}
+    second_object_contributions = {item.key: item for item in ranked_by_id["2"].contributions}
+
+    assert first_object_contributions["price"].raw_value == 0.0
+    assert first_object_contributions["price"].transformed_value == 125000.0
+    assert first_object_contributions["distance"].raw_value == 1.0
+    assert first_object_contributions["distance"].transformed_value == 102300.0
+
+    assert second_object_contributions["price"].raw_value == 1.0
+    assert second_object_contributions["price"].transformed_value == 225000.0
+    assert second_object_contributions["distance"].raw_value == 0.0
+    assert second_object_contributions["distance"].transformed_value == 50000.0

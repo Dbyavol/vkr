@@ -20,3 +20,24 @@ def test_profile_dataset_returns_quality_and_recommendations():
     assert any(field.key == "price" and field.inferred_type == "integer" for field in profile.fields)
     assert any(field.key == "district" and field.inferred_type == "categorical" for field in profile.fields)
     assert "price" in profile.recommended_weights
+
+
+def test_profile_dataset_detects_numeric_field_with_embedded_units():
+    payload = DatasetProfileRequest(
+        dataset=DatasetPayload(
+            rows=[
+                DatasetRow(id="1", values={"kmDriven": "98,000 km"}),
+                DatasetRow(id="2", values={"kmDriven": "190000.0 km"}),
+                DatasetRow(id="3", values={"kmDriven": "77,246 km"}),
+            ]
+        )
+    )
+
+    profile = profile_dataset(payload)
+    field = next(item for item in profile.fields if item.key == "kmDriven")
+
+    assert field.inferred_type == "integer"
+    assert field.detected_unit_family == "distance"
+    assert field.detected_units == ["km"]
+    assert field.recommended_config.target_unit == "km"
+    assert any(rec.code == "NORMALIZE_UNITS" for rec in field.recommendations)

@@ -9,6 +9,7 @@ from typing import Any
 
 import pandas as pd
 
+from app.services.measurement_parsing import parse_measurement
 from app.schemas.imports import ColumnInfo, ImportCommitRequest, ImportCommitResponse, ImportPreviewResponse
 
 
@@ -41,12 +42,7 @@ def _infer_type(values: list[Any]) -> str:
         return "binary"
     if all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in non_null):
         return "numeric"
-    numeric_values = []
-    for value in non_null:
-        try:
-            numeric_values.append(float(str(value).replace(",", ".")))
-        except ValueError:
-            pass
+    numeric_values = [parsed.value for parsed in map(parse_measurement, non_null) if parsed.value is not None]
     if len(numeric_values) == len(non_null):
         return "numeric"
     if len(set(map(str, non_null))) <= 2 and all(str(value).lower() in {"true", "false", "0", "1"} for value in non_null):

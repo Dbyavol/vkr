@@ -42,6 +42,7 @@ def _analysis_dataset(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 "id": str(row["id"]),
                 "title": _object_title(row),
                 "attributes": row["values"],
+                "transformed_attributes": row.get("pre_normalized_values"),
             }
             for row in rows
         ]
@@ -360,7 +361,15 @@ async def analyze_dataset(
     dataset = _analysis_dataset(rows)
     payload = AnalysisRequest(
         dataset=AnalysisDataset(
-            objects=[DatasetObject(id=obj["id"], title=obj["title"], attributes=obj["attributes"]) for obj in dataset["objects"]]
+            objects=[
+                DatasetObject(
+                    id=obj["id"],
+                    title=obj["title"],
+                    attributes=obj["attributes"],
+                    transformed_attributes=obj.get("transformed_attributes"),
+                )
+                for obj in dataset["objects"]
+            ]
         ),
         criteria=[AnalysisCriterionConfig.model_validate(item) for item in criteria],
         target_object_id=target_row_id,
@@ -600,6 +609,7 @@ async def run_pipeline_via_services(
             "id": row["id"],
             "title": title_by_id.get(row["id"], f"Объект {row['id']}"),
             "values": row["values"],
+            "pre_normalized_values": row.get("pre_normalized_values"),
         }
         for row in preprocessing["dataset"]
     ]

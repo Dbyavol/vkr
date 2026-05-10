@@ -6,7 +6,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from app.services.measurement_parsing import coerce_measurement_series
 from app.schemas.preprocessing import (
+    BoxplotStats,
     ChartPoint,
     DatasetProfileRequest,
     DatasetProfileResponse,
@@ -65,14 +67,7 @@ def _numeric_series(series: pd.Series) -> pd.Series:
         return series.astype(float)
     if pd.api.types.is_numeric_dtype(series):
         return pd.to_numeric(series, errors="coerce")
-    normalized = (
-        series.astype("string")
-        .str.strip()
-        .str.replace(" ", "", regex=False)
-        .str.replace(",", ".", regex=False)
-        .replace({"": pd.NA})
-    )
-    return pd.to_numeric(normalized, errors="coerce")
+    return coerce_measurement_series(series, field_key=series.name or "value").series
 
 
 def _is_missing(value: Any) -> bool:
@@ -215,6 +210,22 @@ def _build_missing_matrix(frame: pd.DataFrame, keys: list[str], limit: int = 120
     return result
 
 
+def _build_missing_rows_preview(frame: pd.DataFrame, keys: list[str], limit: int = 14) -> list[dict[str, Any]]:
+    if frame.empty or not keys:
+        return []
+    missing_mask = frame[keys].isna()
+    missing_counts = missing_mask.sum(axis=1)
+    rows_with_missing = missing_counts[missing_counts > 0].head(limit)
+    result: list[dict[str, Any]] = []
+    for row_id in rows_with_missing.index.tolist():
+        row_values = {
+            key: (None if pd.isna(value) else value)
+            for key, value in frame.loc[row_id].to_dict().items()
+        }
+        result.append({"id": str(row_id), "values": row_values})
+    return result
+
+
 def _build_correlation_matrix(frame: pd.DataFrame, numeric_keys: list[str], limit: int = 60) -> list[dict[str, Any]]:
     if len(numeric_keys) < 2:
         return []
@@ -265,10 +276,16 @@ def _profile_field(
         field_type=inferred_type,  # type: ignore[arg-type]
         include_in_output=inferred_type != "text",
     )
+    measurement_result = coerce_measurement_series(series, field_key=key)
+    if measurement_result.detected_unit_family:
+        config.unit_family = measurement_result.detected_unit_family
+    if measurement_result.target_unit:
+        config.target_unit = measurement_result.target_unit
 
     outlier_count = 0
     numeric_min = numeric_max = numeric_mean = numeric_median = None
     histogram: list[ChartPoint] = []
+    boxplot_stats: BoxplotStats | None = None
     top_categories = _category_chart(visual_series if visual_series is not None else series) if include_visuals else []
 
     if inferred_type in {"numeric", "integer", "float"} and numeric_values:
@@ -282,9 +299,15 @@ def _profile_field(
         numeric_max = float(numeric_series.max())
         numeric_mean = float(numeric_series.mean())
         numeric_median = float(numeric_series.median())
+        boxplot_stats = BoxplotStats(
+            min=numeric_min,
+            q1=q1,
+            median=numeric_median,
+            q3=q3,
+            max=numeric_max,
+        )
         if include_visuals:
-            visual_numeric_series = _numeric_series(visual_series if visual_series is not None else series).dropna()
-            histogram = _histogram(visual_numeric_series if not visual_numeric_series.empty else numeric_series, histogram_bins)
+            histogram = _histogram(numeric_series, histogram_bins)
         recommendations.append(
             FieldRecommendation(
                 code="NORMALIZE_NUMERIC",
@@ -319,6 +342,19 @@ def _profile_field(
                     severity="info",
                     message="Для дробного признака можно задать округление на этапе подготовки данных.",
                     suggested_patch={"rounding_precision": 2},
+                )
+            )
+        if measurement_result.note:
+            recommendations.append(
+                FieldRecommendation(
+                    code="NORMALIZE_UNITS",
+                    severity="info",
+                    message=measurement_result.note,
+                    suggested_patch={
+                        "field_type": inferred_type,
+                        "unit_family": measurement_result.detected_unit_family,
+                        "target_unit": measurement_result.target_unit,
+                    },
                 )
             )
 
@@ -404,6 +440,9 @@ def _profile_field(
         key=key,
         inferred_type=config.field_type,
         analytic_candidate=config.include_in_output,
+        detected_unit_family=measurement_result.detected_unit_family,
+        detected_units=measurement_result.detected_units or [],
+        target_unit=measurement_result.target_unit,
         rows_total=rows_total,
         missing_count=missing_count,
         unique_count=unique_count,
@@ -415,6 +454,7 @@ def _profile_field(
         numeric_median=numeric_median,
         outlier_count_iqr=outlier_count,
         histogram=histogram,
+        boxplot_stats=boxplot_stats,
         top_categories=top_categories,
         text_to_categorical_possible=text_to_categorical_possible,
         recommended_config=config,
@@ -477,6 +517,7 @@ def profile_rows(
         recommended_weights=weights,
         weight_notes=notes,
         missing_matrix_preview=_build_missing_matrix(visual_frame, keys) if include_visuals else [],
+        missing_rows_preview=_build_missing_rows_preview(frame, keys) if include_visuals else [],
         correlation_matrix=_build_correlation_matrix(visual_frame, numeric_keys) if include_visuals else [],
     )
 

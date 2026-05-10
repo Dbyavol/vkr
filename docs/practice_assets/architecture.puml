@@ -9,9 +9,9 @@ skinparam linetype ortho
 
 actor "Пользователь" as User
 
-rectangle "Пользовательский интерфейс\nReact / TypeScript" as Frontend
+rectangle "Пользовательский интерфейс" as Frontend
 
-package "Серверная часть\nFastAPI" as Backend {
+package "Серверная часть" as Backend {
   [Модуль авторизации] as Auth
   [Модуль импорта и предпросмотра] as Import
   [Модуль предобработки] as Prep
@@ -21,11 +21,11 @@ package "Серверная часть\nFastAPI" as Backend {
   
 }
 
-database "PostgreSQL" as DB
-cloud "Объектное хранилище MinIO" as S3
+database "Реляционная база данных" as DB
+cloud "Объектное хранилище данных" as S3
 
 User --> Frontend
-Frontend --> Backend : REST API
+Frontend --> Backend
 
 Auth --> DB
 Import --> DB

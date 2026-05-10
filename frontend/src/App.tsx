@@ -548,6 +548,14 @@ function DistributionChart({
     [histogramData, values, bins],
   );
   const stats = useMemo(() => boxplotData ?? boxplotStats(values), [boxplotData, values]);
+  const outlierBounds = useMemo(() => {
+    if (!stats) return null;
+    const iqr = stats.q3 - stats.q1;
+    return {
+      low: stats.q1 - 1.5 * iqr,
+      high: stats.q3 + 1.5 * iqr,
+    };
+  }, [stats]);
 
   if (!values.length) {
     return <p className="muted-note">Недостаточно данных для графика {title.toLowerCase()}.</p>;
@@ -560,6 +568,15 @@ function DistributionChart({
     const maxValue = Math.max(...histogram.map((point) => point.value), 1);
     const barWidth = Math.max(10, Math.floor(width / Math.max(histogram.length, 1)) - 8);
     const labelStep = Math.max(1, Math.ceil(histogram.length / 12));
+    const domainMin = stats?.min ?? Math.min(...values);
+    const domainMax = stats?.max ?? Math.max(...values);
+    const bounds =
+      outlierBounds && domainMax > domainMin
+        ? [
+            { key: "low", value: outlierBounds.low },
+            { key: "high", value: outlierBounds.high },
+          ].filter((item) => item.value >= domainMin && item.value <= domainMax)
+        : [];
     return (
       <svg width="100%" height={height + 52} viewBox={`0 0 ${width} ${height + 52}`} role="img" aria-label={title}>
         <rect x="0" y="0" width={width} height={height} fill="#f8fafc" stroke="#d7dde8" />
@@ -567,6 +584,17 @@ function DistributionChart({
         <line x1="0" y1={Math.round(height * 0.75)} x2={width} y2={Math.round(height * 0.75)} stroke="#e1e8f0" strokeWidth="1" />
         <line x1="0" y1={Math.round(height * 0.5)} x2={width} y2={Math.round(height * 0.5)} stroke="#e1e8f0" strokeWidth="1" />
         <line x1="0" y1={Math.round(height * 0.25)} x2={width} y2={Math.round(height * 0.25)} stroke="#e1e8f0" strokeWidth="1" />
+        {bounds.map((item) => {
+          const x = ((item.value - domainMin) / (domainMax - domainMin)) * width;
+          return (
+            <g key={item.key}>
+              <line x1={x} y1={6} x2={x} y2={height} stroke="#dc2626" strokeWidth="2" strokeDasharray="6 4" opacity="0.85" />
+              <text x={x} y={14} fontSize="10" textAnchor="middle" fill="#dc2626">
+                IQR
+              </text>
+            </g>
+          );
+        })}
         {histogram.map((point, index) => {
           const x = 4 + index * (barWidth + 8);
           const barHeight = Math.max(2, Math.round((point.value / maxValue) * (height - 12)));
@@ -1800,9 +1828,20 @@ export function App() {
       value: objectValueLabel(selectedTargetRow.values[key]),
     }));
   }, [selectedTargetRow, fields, criteria, geoLatitudeKey, geoLongitudeKey]);
+  const visibleOutlierFieldKeys = useMemo(
+    () =>
+      fields
+        .filter((field) => field.include_in_output && isNumericFieldType(field.field_type))
+        .map((field) => field.key),
+    [fields],
+  );
   const fullDatasetOutlierTotal = useMemo(
-    () => profile.filter((field) => ["numeric", "integer", "float"].includes(field.inferred_type)).reduce((sum, field) => sum + field.outlier_count_iqr, 0),
-    [profile],
+    () =>
+      visibleOutlierFieldKeys.reduce(
+        (sum, key) => sum + (profile.find((field) => field.key === key)?.outlier_count_iqr ?? 0),
+        0,
+      ),
+    [profile, visibleOutlierFieldKeys],
   );
   const histogramBinsForRefresh = useMemo(
     () =>
@@ -3282,7 +3321,7 @@ export function App() {
                       <table className="types-table">
                         <thead>
                           <tr>
-                            <th>Колонка</th>
+                            <th>Признак</th>
                             <th>Примеры</th>
                             <th>Тип данных</th>
                             <th>В названии</th>
@@ -3673,7 +3712,7 @@ export function App() {
                     </div>
                     <div className="field-board">
                       {fields
-                        .filter((field) => isNumericFieldType(field.field_type))
+                        .filter((field) => field.include_in_output && isNumericFieldType(field.field_type))
                         .map((field) => {
                           const index = fields.findIndex((item) => item.key === field.key);
                           const fieldProfile = profile.find((item) => item.key === field.key);
@@ -3710,6 +3749,7 @@ export function App() {
                                 values={values}
                                 bins={appliedBins}
                                 mode={currentMode}
+                                histogramData={fieldProfile?.histogram ?? []}
                                 boxplotData={fieldProfile?.boxplot_stats ?? null}
                               />
                               <div className="control-grid">

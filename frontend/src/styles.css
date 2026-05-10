@@ -790,7 +790,11 @@ table {
 
 .types-table th:nth-child(1),
 .types-table td:nth-child(1) {
-  width: 150px;
+  width: 220px;
+  min-width: 220px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .types-table th:nth-child(2),

@@ -15,8 +15,15 @@ export type PreviewResponse = {
   rows_total: number;
   columns: PreviewColumn[];
   preview_rows: Record<string, unknown>[];
+  pre_normalized_preview_rows?: Record<string, unknown>[];
   warnings: string[];
   normalized_dataset?: {
+    rows: Array<{
+      id: string;
+      values: Record<string, unknown>;
+    }>;
+  };
+  pre_normalized_dataset?: {
     rows: Array<{
       id: string;
       values: Record<string, unknown>;
@@ -118,6 +125,7 @@ export type PipelineProfileResponse = {
   dataset_file_id?: number;
   preview: PreviewResponse;
   profile: DatasetProfileResponse;
+  pre_normalized_profile?: DatasetProfileResponse | null;
 };
 
 export type RawObjectsResponse = {
@@ -128,6 +136,7 @@ export type RawObjectsResponse = {
 export type PreprocessingRefreshResponse = {
   preview: PreviewResponse;
   profile: DatasetProfileResponse;
+  pre_normalized_profile?: DatasetProfileResponse | null;
   preprocessing_summary: Record<string, unknown>;
 };
 

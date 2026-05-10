@@ -118,6 +118,38 @@ def _filter_rows_by_geo_radius(
     return filtered
 
 
+def _restore_hidden_geo_values(
+    *,
+    processed_rows: list[dict[str, Any]],
+    source_rows: list[dict[str, Any]],
+    fields: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    latitude_key, longitude_key = _geo_field_keys(fields)
+    if not latitude_key or not longitude_key:
+        return processed_rows
+
+    source_by_id = {str(row.get("id")): dict(row.get("values") or {}) for row in source_rows}
+    restored_rows: list[dict[str, Any]] = []
+    for row in processed_rows:
+        object_id = str(row.get("id"))
+        source_values = source_by_id.get(object_id) or {}
+        row_values = dict(row.get("values") or {})
+        pre_normalized_values = dict(row.get("pre_normalized_values") or {})
+        for key in (latitude_key, longitude_key):
+            if key not in row_values and key in source_values:
+                row_values[key] = source_values[key]
+            if key not in pre_normalized_values and key in source_values:
+                pre_normalized_values[key] = source_values[key]
+        restored_rows.append(
+            {
+                **row,
+                "values": row_values,
+                "pre_normalized_values": pre_normalized_values or row.get("pre_normalized_values"),
+            }
+        )
+    return restored_rows
+
+
 async def fetch_preview(*, filename: str, body: bytes) -> dict[str, Any]:
     started_at = start_timer()
     preview = parse_dataset_bytes(filename, body).model_dump()
@@ -136,7 +168,11 @@ def lightweight_preview(preview: dict[str, Any], limit: int = PREVIEW_NORMALIZED
     normalized_dataset = preview.get("normalized_dataset") or {}
     rows = list(normalized_dataset.get("rows") or [])
     trimmed["normalized_dataset"] = {"rows": rows[:limit]}
+    pre_normalized_dataset = preview.get("pre_normalized_dataset") or {}
+    pre_normalized_rows = list(pre_normalized_dataset.get("rows") or [])
+    trimmed["pre_normalized_dataset"] = {"rows": pre_normalized_rows[:limit]}
     trimmed["preview_rows"] = list(preview.get("preview_rows") or [])[: min(limit, 50)]
+    trimmed["pre_normalized_preview_rows"] = list(preview.get("pre_normalized_preview_rows") or [])[: min(limit, 50)]
     if len(rows) > limit:
         warnings = list(trimmed.get("warnings") or [])
         warnings.append(
@@ -311,7 +347,17 @@ async def fetch_stored_dataset_profile(
         histogram_bins_by_field=histogram_bins_by_field,
         detail_level=detail_level,
     )
-    return {"dataset_file_id": dataset_file_id, "preview": lightweight_preview(raw_preview), "profile": profile}
+    raw_preview_with_views = {
+        **raw_preview,
+        "pre_normalized_preview_rows": list(raw_preview.get("preview_rows") or []),
+        "pre_normalized_dataset": raw_preview.get("normalized_dataset") or {"rows": []},
+    }
+    return {
+        "dataset_file_id": dataset_file_id,
+        "preview": lightweight_preview(raw_preview_with_views),
+        "profile": profile,
+        "pre_normalized_profile": profile,
+    }
 
 
 async def fetch_raw_objects_from_storage(
@@ -613,6 +659,11 @@ async def run_pipeline_via_services(
         }
         for row in preprocessing["dataset"]
     ]
+    processed_rows = _restore_hidden_geo_values(
+        processed_rows=processed_rows,
+        source_rows=preview["normalized_dataset"]["rows"],
+        fields=fields_payload,
+    )
     processed_rows = _filter_rows_by_geo_radius(
         processed_rows,
         fields_payload,
@@ -711,6 +762,13 @@ def _build_preview_from_processed(
         ordered_keys = list((rows[0].get("values") or {}).keys())
 
     normalized_rows = [{"id": str(row.get("id", "")), "values": dict(row.get("values") or {})} for row in rows]
+    pre_normalized_rows = [
+        {
+            "id": str(row.get("id", "")),
+            "values": dict(row.get("pre_normalized_values") or row.get("values") or {}),
+        }
+        for row in rows
+    ]
     columns: list[dict[str, Any]] = []
     for key in ordered_keys:
         values = [row["values"].get(key) for row in normalized_rows]
@@ -728,13 +786,16 @@ def _build_preview_from_processed(
         )
 
     preview_rows = [{"id": row["id"], **row["values"]} for row in normalized_rows[:50]]
+    pre_normalized_preview_rows = [{"id": row["id"], **row["values"]} for row in pre_normalized_rows[:50]]
     return {
         "filename": filename,
         "rows_total": len(normalized_rows),
         "columns": columns,
         "preview_rows": preview_rows,
+        "pre_normalized_preview_rows": pre_normalized_preview_rows,
         "warnings": warnings or [],
         "normalized_dataset": {"rows": normalized_rows},
+        "pre_normalized_dataset": {"rows": pre_normalized_rows},
     }
 
 
@@ -763,6 +824,19 @@ async def refresh_preprocessing_from_storage(
         histogram_bins=histogram_bins,
         histogram_bins_by_field=histogram_bins_by_field,
     )
+    pre_normalized_rows = [
+        {
+            "id": row["id"],
+            "values": dict(row.get("pre_normalized_values") or row.get("values") or {}),
+        }
+        for row in preprocessing["dataset"]
+    ]
+    pre_normalized_profile = await profile_imported_dataset(
+        rows=pre_normalized_rows,
+        detail_level=detail_level,
+        histogram_bins=histogram_bins,
+        histogram_bins_by_field=histogram_bins_by_field,
+    )
     refreshed_preview = _build_preview_from_processed(
         filename=resolved_filename,
         rows=preprocessing["dataset"],
@@ -772,6 +846,7 @@ async def refresh_preprocessing_from_storage(
     result = {
         "preview": lightweight_preview(refreshed_preview),
         "profile": profile,
+        "pre_normalized_profile": pre_normalized_profile,
         "preprocessing_summary": preprocessing.get("summary") or {},
     }
     pipeline_logger.info(

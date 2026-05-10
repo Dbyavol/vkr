@@ -43,6 +43,7 @@ import type {
 type StageId = "data" | "preprocessing" | "criteria" | "results" | "projects" | "history" | "admin";
 type PrepSectionId = "preview" | "types" | "missing" | "outliers" | "encoding" | "scaling";
 type ChartMode = "histogram" | "boxplot";
+type ValueViewMode = "pre_normalized" | "normalized";
 const DATETIME_FORMAT_OPTIONS = [
   "YYYY-MM-DD",
   "YYYY/MM/DD",
@@ -426,6 +427,19 @@ function numericValuesForField(preview: PreviewResponse | null, key: string) {
     .filter((value) => Number.isFinite(value));
 }
 
+function rowsForView(preview: PreviewResponse | null, view: ValueViewMode) {
+  if (view === "pre_normalized") {
+    return preview?.pre_normalized_dataset?.rows ?? preview?.normalized_dataset?.rows ?? [];
+  }
+  return preview?.normalized_dataset?.rows ?? [];
+}
+
+function numericValuesForFieldByView(preview: PreviewResponse | null, key: string, view: ValueViewMode) {
+  return rowsForView(preview, view)
+    .map((row) => Number(String(row.values[key] ?? "").replace(",", ".")))
+    .filter((value) => Number.isFinite(value));
+}
+
 function histogramFromValues(values: number[], bins: number) {
   if (!values.length) return [];
   if (bins <= 1 || values.length === 1) {
@@ -750,6 +764,37 @@ function LabelWithTip({ label, tip }: { label: string; tip: ReactNode }) {
   );
 }
 
+function ValueViewSwitch({
+  value,
+  onChange,
+}: {
+  value: ValueViewMode;
+  onChange: (value: ValueViewMode) => void;
+}) {
+  return (
+    <div className="value-view-switch" role="tablist" aria-label="Режим отображения значений">
+      <button
+        type="button"
+        role="tab"
+        aria-selected={value === "pre_normalized"}
+        className={`value-view-option ${value === "pre_normalized" ? "active" : ""}`}
+        onClick={() => onChange("pre_normalized")}
+      >
+        Без масштабирования
+      </button>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={value === "normalized"}
+        className={`value-view-option ${value === "normalized" ? "active" : ""}`}
+        onClick={() => onChange("normalized")}
+      >
+        Нормализованное
+      </button>
+    </div>
+  );
+}
+
 function criteriaDefaults(
   fields: FieldConfig[],
   recommendedWeights?: Record<string, number>,
@@ -1038,6 +1083,7 @@ const EMPTY_PREVIEW_RESPONSE: PreviewResponse = {
   rows_total: 0,
   columns: [],
   preview_rows: [],
+  pre_normalized_preview_rows: [],
   warnings: [],
 };
 
@@ -1071,6 +1117,7 @@ type SavedWorkflowState = {
   rawPreview?: PreviewResponse | null;
   preview?: PreviewResponse | null;
   profile?: FieldProfile[];
+  preNormalizedProfile?: FieldProfile[];
   quality?: DatasetQualityReport | null;
   recommendedWeights?: Record<string, number>;
   recommendedCriteria?: CriterionConfig[];
@@ -1090,9 +1137,12 @@ type SavedWorkflowState = {
   histogramBinsByField?: Record<string, number>;
   missingMatrixPreview?: Array<{ id: string; missing_count: number; missing_fields: string[] }>;
   missingRowsPreviewData?: Array<{ id: string; values: Record<string, unknown> }>;
+  preNormalizedMissingRowsPreviewData?: Array<{ id: string; values: Record<string, unknown> }>;
   correlationMatrix?: Array<{ left_key: string; right_key: string; pearson: number; samples: number }>;
   lastHistoryId?: number | null;
   profileDetailLevel?: "summary" | "detailed";
+  preprocessingValueView?: ValueViewMode;
+  targetValueView?: ValueViewMode;
 };
 
 const WORKFLOW_STORAGE_KEY = "comparison_workflow_state";
@@ -1688,6 +1738,7 @@ export function App() {
   const [rawPreview, setRawPreview] = useState<PreviewResponse | null>(savedWorkflow.rawPreview ?? savedWorkflow.preview ?? null);
   const [preview, setPreview] = useState<PreviewResponse | null>(savedWorkflow.preview ?? null);
   const [profile, setProfile] = useState<FieldProfile[]>(savedWorkflow.profile ?? []);
+  const [preNormalizedProfile, setPreNormalizedProfile] = useState<FieldProfile[]>(savedWorkflow.preNormalizedProfile ?? []);
   const [quality, setQuality] = useState<DatasetQualityReport | null>(savedWorkflow.quality ?? null);
   const [recommendedWeights, setRecommendedWeights] = useState<Record<string, number>>(savedWorkflow.recommendedWeights ?? {});
   const [weightNotes, setWeightNotes] = useState<string[]>(savedWorkflow.weightNotes ?? []);
@@ -1696,6 +1747,9 @@ export function App() {
   );
   const [missingRowsPreviewData, setMissingRowsPreviewData] = useState<Array<{ id: string; values: Record<string, unknown> }>>(
     savedWorkflow.missingRowsPreviewData ?? [],
+  );
+  const [preNormalizedMissingRowsPreviewData, setPreNormalizedMissingRowsPreviewData] = useState<Array<{ id: string; values: Record<string, unknown> }>>(
+    savedWorkflow.preNormalizedMissingRowsPreviewData ?? [],
   );
   const [correlationMatrix, setCorrelationMatrix] = useState<Array<{ left_key: string; right_key: string; pearson: number; samples: number }>>(
     savedWorkflow.correlationMatrix ?? [],
@@ -1720,6 +1774,8 @@ export function App() {
   const [applyingSection, setApplyingSection] = useState<PrepSectionId | null>(null);
   const [profileDetailLevel, setProfileDetailLevel] = useState<"summary" | "detailed">(savedWorkflow.profileDetailLevel ?? "summary");
   const [profileDetailsLoading, setProfileDetailsLoading] = useState(false);
+  const [preprocessingValueView, setPreprocessingValueView] = useState<ValueViewMode>(savedWorkflow.preprocessingValueView ?? "pre_normalized");
+  const [targetValueView, setTargetValueView] = useState<ValueViewMode>(savedWorkflow.targetValueView ?? "pre_normalized");
 
   const totalWeight = useMemo(() => criteria.reduce((sum, item) => sum + Number(item.weight || 0), 0), [criteria]);
   const activePreprocessingFields = useMemo(
@@ -1753,6 +1809,7 @@ export function App() {
     () => result?.ranking.find((item) => item.object_id === selectedResultId) ?? result?.ranking[0],
     [result, selectedResultId],
   );
+  const currentProfile = preprocessingValueView === "normalized" ? profile : (preNormalizedProfile.length ? preNormalizedProfile : profile);
   const activeProjectLatestHistory = useMemo(() => {
     if (!activeProjectId) return null;
     return [...history]
@@ -1760,15 +1817,19 @@ export function App() {
       .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))[0] ?? null;
   }, [history, activeProjectId]);
   const missingRowsPreview = useMemo(() => {
-    if (missingRowsPreviewData.length) return missingRowsPreviewData;
-    const rows = preview?.normalized_dataset?.rows ?? [];
+    const preferredRows =
+      preprocessingValueView === "normalized"
+        ? missingRowsPreviewData
+        : (preNormalizedMissingRowsPreviewData.length ? preNormalizedMissingRowsPreviewData : missingRowsPreviewData);
+    if (preferredRows.length) return preferredRows;
+    const rows = rowsForView(preview, preprocessingValueView);
     if (!rows.length || !missingMatrixPreview.length) return [];
     const ids = new Set(missingMatrixPreview.map((item) => item.id));
     return rows.filter((row) => ids.has(row.id)).slice(0, 14);
-  }, [preview, missingMatrixPreview, missingRowsPreviewData]);
+  }, [preview, missingMatrixPreview, missingRowsPreviewData, preNormalizedMissingRowsPreviewData, preprocessingValueView]);
   const transformedPreviewRows = useMemo(
-    () => (preview?.normalized_dataset?.rows ?? []).slice(0, 40),
-    [preview],
+    () => rowsForView(preview, preprocessingValueView).slice(0, 40),
+    [preview, preprocessingValueView],
   );
   const objectLabelMap = useMemo(() => {
     const rows = preview?.normalized_dataset?.rows ?? [];
@@ -1796,8 +1857,8 @@ export function App() {
   const geoLongitudeKey = useMemo(() => findGeoFieldKey(fields, "geo_longitude"), [fields]);
   const geoSearchAvailable = Boolean(geoLatitudeKey && geoLongitudeKey);
   const selectedTargetRow = useMemo(
-    () => (preview?.normalized_dataset?.rows ?? []).find((row) => row.id === targetRowId) ?? null,
-    [preview, targetRowId],
+    () => rowsForView(preview, targetValueView).find((row) => row.id === targetRowId) ?? null,
+    [preview, targetRowId, targetValueView],
   );
   const selectedTargetPreviewItems = useMemo(() => {
     if (!selectedTargetRow) return [];
@@ -1838,10 +1899,10 @@ export function App() {
   const fullDatasetOutlierTotal = useMemo(
     () =>
       visibleOutlierFieldKeys.reduce(
-        (sum, key) => sum + (profile.find((field) => field.key === key)?.outlier_count_iqr ?? 0),
+        (sum, key) => sum + (currentProfile.find((field) => field.key === key)?.outlier_count_iqr ?? 0),
         0,
       ),
-    [profile, visibleOutlierFieldKeys],
+    [currentProfile, visibleOutlierFieldKeys],
   );
   const histogramBinsForRefresh = useMemo(
     () =>
@@ -1855,20 +1916,24 @@ export function App() {
 
   function applyProfileSnapshot(
     nextProfile: FieldProfile[],
+    nextPreNormalizedProfile: FieldProfile[],
     nextQuality: DatasetQualityReport | null,
     nextRecommendedWeights: Record<string, number>,
     nextWeightNotes: string[],
     nextMissingMatrixPreview: Array<{ id: string; missing_count: number; missing_fields: string[] }>,
     nextMissingRowsPreviewData: Array<{ id: string; values: Record<string, unknown> }>,
+    nextPreNormalizedMissingRowsPreviewData: Array<{ id: string; values: Record<string, unknown> }>,
     nextCorrelationMatrix: Array<{ left_key: string; right_key: string; pearson: number; samples: number }>,
     nextDetailLevel: "summary" | "detailed",
   ) {
     setProfile(nextProfile);
+    setPreNormalizedProfile(nextPreNormalizedProfile);
     setQuality(nextQuality);
     setRecommendedWeights(nextRecommendedWeights);
     setWeightNotes(nextWeightNotes);
     setMissingMatrixPreview(nextMissingMatrixPreview);
     setMissingRowsPreviewData(nextMissingRowsPreviewData);
+    setPreNormalizedMissingRowsPreviewData(nextPreNormalizedMissingRowsPreviewData);
     setCorrelationMatrix(nextCorrelationMatrix);
     setProfileDetailLevel(nextDetailLevel);
   }
@@ -1907,11 +1972,13 @@ export function App() {
       setPreview(response.preview);
       applyProfileSnapshot(
         response.profile.fields,
+        response.pre_normalized_profile?.fields ?? response.profile.fields,
         response.profile.quality,
         response.profile.recommended_weights,
         response.profile.weight_notes,
         response.profile.missing_matrix_preview ?? [],
         response.profile.missing_rows_preview ?? [],
+        response.pre_normalized_profile?.missing_rows_preview ?? response.profile.missing_rows_preview ?? [],
         response.profile.correlation_matrix ?? [],
         response.profile.detail_level === "detailed" ? "detailed" : "summary",
       );
@@ -2008,11 +2075,13 @@ export function App() {
     setRawPreview(null);
     setPreview(null);
     setProfile([]);
+    setPreNormalizedProfile([]);
     setQuality(null);
     setRecommendedWeights({});
     setWeightNotes([]);
     setMissingMatrixPreview([]);
     setMissingRowsPreviewData([]);
+    setPreNormalizedMissingRowsPreviewData([]);
     setCorrelationMatrix([]);
     setFields([]);
     setCriteria([]);
@@ -2047,11 +2116,13 @@ export function App() {
     setRawPreview(null);
     setPreview(null);
     setProfile([]);
+    setPreNormalizedProfile([]);
     setQuality(null);
     setRecommendedWeights({});
     setWeightNotes([]);
     setMissingMatrixPreview([]);
     setMissingRowsPreviewData([]);
+    setPreNormalizedMissingRowsPreviewData([]);
     setCorrelationMatrix([]);
     setCriteria([]);
     setResult(null);
@@ -2274,11 +2345,13 @@ export function App() {
       rawPreview,
       preview,
       profile,
+      preNormalizedProfile,
       quality,
       recommendedWeights,
       weightNotes,
       missingMatrixPreview,
       missingRowsPreviewData,
+      preNormalizedMissingRowsPreviewData,
       correlationMatrix,
       fields,
       criteria,
@@ -2291,6 +2364,8 @@ export function App() {
       scenarioTitle,
       sourceFilename,
       preprocessingSection,
+      preprocessingValueView,
+      targetValueView,
       histogramBinsByField,
       lastHistoryId,
       profileDetailLevel,
@@ -2305,11 +2380,13 @@ export function App() {
         rawPreview,
         preview,
         profile,
+        preNormalizedProfile,
         quality,
         recommendedWeights,
         weightNotes,
         missingMatrixPreview,
         missingRowsPreviewData,
+        preNormalizedMissingRowsPreviewData,
         correlationMatrix,
         fields,
         criteria,
@@ -2322,6 +2399,8 @@ export function App() {
         scenarioTitle,
         sourceFilename,
         preprocessingSection,
+        preprocessingValueView,
+        targetValueView,
         histogramBinsByField,
         lastHistoryId,
         profileDetailLevel,
@@ -2338,11 +2417,13 @@ export function App() {
     rawPreview,
     preview,
     profile,
+    preNormalizedProfile,
     quality,
     recommendedWeights,
     weightNotes,
     missingMatrixPreview,
     missingRowsPreviewData,
+    preNormalizedMissingRowsPreviewData,
     correlationMatrix,
     fields,
     criteria,
@@ -2354,6 +2435,8 @@ export function App() {
     scenarioTitle,
     sourceFilename,
     preprocessingSection,
+    preprocessingValueView,
+    targetValueView,
     histogramBinsByField,
     lastHistoryId,
     profileDetailLevel,
@@ -2429,11 +2512,13 @@ export function App() {
       setRawPreview(null);
       setPreview(null);
       setProfile([]);
+      setPreNormalizedProfile([]);
       setQuality(null);
       setRecommendedWeights({});
       setWeightNotes([]);
       setMissingMatrixPreview([]);
       setMissingRowsPreviewData([]);
+      setPreNormalizedMissingRowsPreviewData([]);
       setCorrelationMatrix([]);
       setFields([]);
       setCriteria([]);
@@ -2459,11 +2544,13 @@ export function App() {
         setRawPreview(null);
         setPreview(null);
         setProfile([]);
+        setPreNormalizedProfile([]);
         setQuality(null);
         setRecommendedWeights({});
         setWeightNotes([]);
         setMissingMatrixPreview([]);
         setMissingRowsPreviewData([]);
+        setPreNormalizedMissingRowsPreviewData([]);
         setCorrelationMatrix([]);
         setFields([]);
         setCriteria([]);
@@ -2511,11 +2598,13 @@ export function App() {
         setRawPreview((current) => current ?? response.preview);
         setPreview(response.preview);
         setProfile(response.profile.fields);
+        setPreNormalizedProfile(response.pre_normalized_profile?.fields ?? response.profile.fields);
         setQuality(response.profile.quality);
         setRecommendedWeights(response.profile.recommended_weights);
         setWeightNotes(response.profile.weight_notes);
         setMissingMatrixPreview(response.profile.missing_matrix_preview ?? []);
         setMissingRowsPreviewData(response.profile.missing_rows_preview ?? []);
+        setPreNormalizedMissingRowsPreviewData(response.pre_normalized_profile?.missing_rows_preview ?? response.profile.missing_rows_preview ?? []);
         setCorrelationMatrix(response.profile.correlation_matrix ?? []);
         setHistogramBinsByField(nextHistogramBinsByField);
         setHistogramDraftBinsByField(nextHistogramBinsByField);
@@ -2524,11 +2613,13 @@ export function App() {
         setRawPreview(null);
         setPreview(null);
         setProfile([]);
+        setPreNormalizedProfile([]);
         setQuality(null);
         setRecommendedWeights({});
         setWeightNotes([]);
         setMissingMatrixPreview([]);
         setMissingRowsPreviewData([]);
+        setPreNormalizedMissingRowsPreviewData([]);
         setCorrelationMatrix([]);
         setHistogramBinsByField({});
         setHistogramDraftBinsByField({});
@@ -2595,11 +2686,13 @@ export function App() {
       setRawPreview(response.preview);
       setPreview(response.preview);
       setProfile([]);
+      setPreNormalizedProfile([]);
       setQuality(null);
       setRecommendedWeights({});
       setWeightNotes([]);
       setMissingMatrixPreview([]);
       setMissingRowsPreviewData([]);
+      setPreNormalizedMissingRowsPreviewData([]);
       setCorrelationMatrix([]);
       setProfileDetailLevel("summary");
       setFields([]);
@@ -2688,11 +2781,13 @@ export function App() {
       setPreview(response.preview);
       applyProfileSnapshot(
         response.profile.fields,
+        response.pre_normalized_profile?.fields ?? response.profile.fields,
         response.profile.quality,
         response.profile.recommended_weights,
         response.profile.weight_notes,
         response.profile.missing_matrix_preview ?? [],
         response.profile.missing_rows_preview ?? [],
+        response.pre_normalized_profile?.missing_rows_preview ?? response.profile.missing_rows_preview ?? [],
         response.profile.correlation_matrix ?? [],
         response.profile.detail_level === "detailed" ? "detailed" : "summary",
       );
@@ -2705,11 +2800,13 @@ export function App() {
           setPreview(detailedResponse.preview);
           applyProfileSnapshot(
             detailedResponse.profile.fields,
+            detailedResponse.pre_normalized_profile?.fields ?? detailedResponse.profile.fields,
             detailedResponse.profile.quality,
             detailedResponse.profile.recommended_weights,
             detailedResponse.profile.weight_notes,
             detailedResponse.profile.missing_matrix_preview ?? [],
             detailedResponse.profile.missing_rows_preview ?? [],
+            detailedResponse.pre_normalized_profile?.missing_rows_preview ?? detailedResponse.profile.missing_rows_preview ?? [],
             detailedResponse.profile.correlation_matrix ?? [],
             detailedResponse.profile.detail_level === "detailed" ? "detailed" : "summary",
           );
@@ -3267,9 +3364,12 @@ export function App() {
                   <>
                     <div className="prep-section-head">
                       <p>Проверьте текущий вид датасета после выбранных настроек.</p>
-                      <button onClick={() => applyPreprocessingSection("preview")} disabled={loading || !datasetFileId}>
-                        {applyingSection === "preview" ? "Применяем..." : "Применить"}
-                      </button>
+                      <div className="panel-head-actions">
+                        <ValueViewSwitch value={preprocessingValueView} onChange={setPreprocessingValueView} />
+                        <button onClick={() => applyPreprocessingSection("preview")} disabled={loading || !datasetFileId}>
+                          {applyingSection === "preview" ? "Применяем..." : "Применить"}
+                        </button>
+                      </div>
                     </div>
                     {preview ? (
                       <>
@@ -3589,9 +3689,12 @@ export function App() {
                   <>
                     <div className="prep-section-head">
                       <p>Задайте стратегию обработки пропусков для нужных полей.</p>
-                      <button onClick={() => applyPreprocessingSection("missing")} disabled={loading || !datasetFileId}>
-                        {applyingSection === "missing" ? "Применяем..." : "Применить"}
-                      </button>
+                      <div className="panel-head-actions">
+                        <ValueViewSwitch value={preprocessingValueView} onChange={setPreprocessingValueView} />
+                        <button onClick={() => applyPreprocessingSection("missing")} disabled={loading || !datasetFileId}>
+                          {applyingSection === "missing" ? "Применяем..." : "Применить"}
+                        </button>
+                      </div>
                     </div>
                     <div className="table-wrap dataset-table wide">
                       <table>
@@ -3634,7 +3737,7 @@ export function App() {
                         )
                         .map((field) => {
                           const index = fields.findIndex((item) => item.key === field.key);
-                          const missingCount = preview?.columns.find((column) => column.normalized_name === field.key)?.missing_count ?? 0;
+                          const missingCount = currentProfile.find((item) => item.key === field.key)?.missing_count ?? 0;
                           return (
                             <article className="field-card" key={field.key}>
                               <div className="field-card-head">
@@ -3706,17 +3809,20 @@ export function App() {
                   <>
                     <div className="prep-section-head">
                       <p>Настройте правила обработки выбросов для числовых признаков.</p>
-                      <button onClick={() => applyPreprocessingSection("outliers")} disabled={loading || !datasetFileId}>
-                        {applyingSection === "outliers" ? "Применяем..." : "Применить"}
-                      </button>
+                      <div className="panel-head-actions">
+                        <ValueViewSwitch value={preprocessingValueView} onChange={setPreprocessingValueView} />
+                        <button onClick={() => applyPreprocessingSection("outliers")} disabled={loading || !datasetFileId}>
+                          {applyingSection === "outliers" ? "Применяем..." : "Применить"}
+                        </button>
+                      </div>
                     </div>
                     <div className="field-board">
                       {fields
                         .filter((field) => field.include_in_output && isNumericFieldType(field.field_type))
                         .map((field) => {
                           const index = fields.findIndex((item) => item.key === field.key);
-                          const fieldProfile = profile.find((item) => item.key === field.key);
-                          const values = numericValuesForField(preview, field.key);
+                          const fieldProfile = currentProfile.find((item) => item.key === field.key);
+                          const values = numericValuesForFieldByView(preview, field.key, preprocessingValueView);
                           const currentMode = chartModeByField[field.key] ?? "histogram";
                           const appliedBins = histogramBinsByField[field.key] ?? 8;
                           const outliersCount = fieldProfile?.outlier_count_iqr ?? 0;
@@ -3883,6 +3989,7 @@ export function App() {
                       />
                     </label>
                   ) : null}
+                  <ValueViewSwitch value={targetValueView} onChange={setTargetValueView} />
                   {selectedTargetRow ? (
                     <TargetObjectPreviewCard
                       objectId={selectedTargetRow.id}

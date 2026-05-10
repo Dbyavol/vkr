@@ -23,8 +23,10 @@ class ImportedPreview(BaseModel):
     rows_total: int
     columns: list[ImportedColumn]
     preview_rows: list[dict[str, Any]]
+    pre_normalized_preview_rows: list[dict[str, Any]] = Field(default_factory=list)
     warnings: list[str]
     normalized_dataset: dict[str, list[PipelineRow]]
+    pre_normalized_dataset: dict[str, list[PipelineRow]] = Field(default_factory=dict)
 
 
 FieldType = Literal["numeric", "integer", "float", "geo_latitude", "geo_longitude", "categorical", "binary", "text", "datetime"]
@@ -120,6 +122,7 @@ class PipelinePreprocessRefreshRequest(BaseModel):
 class PipelinePreprocessRefreshResponse(BaseModel):
     preview: ImportedPreview
     profile: dict[str, Any]
+    pre_normalized_profile: dict[str, Any] | None = None
     preprocessing_summary: dict[str, Any]
 
 
@@ -127,6 +130,7 @@ class PipelineProfileStoredResponse(BaseModel):
     dataset_file_id: int
     preview: ImportedPreview
     profile: dict[str, Any]
+    pre_normalized_profile: dict[str, Any] | None = None
 
 
 class PipelineStoredProfileRequest(BaseModel):

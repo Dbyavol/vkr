@@ -2252,11 +2252,48 @@ export function App() {
     setCriteria((current) => applyModeDefaultsToCriteria(current, nextMode));
   }
 
-  function applyHistogramBins(fieldKey: string) {
-    setHistogramBinsByField((current) => {
-      const nextValue = Math.min(64, Math.max(2, histogramDraftBinsByField[fieldKey] ?? current[fieldKey] ?? 8));
-      return { ...current, [fieldKey]: nextValue };
-    });
+  async function applyHistogramBins(fieldKey: string) {
+    if (!datasetFileId) return;
+    const nextHistogramBins = {
+      ...histogramBinsByField,
+      [fieldKey]: Math.min(64, Math.max(2, histogramDraftBinsByField[fieldKey] ?? histogramBinsByField[fieldKey] ?? 8)),
+    };
+    setHistogramBinsByField(nextHistogramBins);
+    setHistogramDraftBinsByField(nextHistogramBins);
+    setLoading(true);
+    setError(null);
+    try {
+      const effectiveFields = enforceRequiredScaling(fields);
+      if (effectiveFields !== fields) {
+        setFields(effectiveFields);
+      }
+      const response = await refreshPreprocessing(
+        datasetFileId,
+        effectiveFields,
+        sourceFilename || preview?.filename || undefined,
+        {
+          histogramBinsByField: nextHistogramBins,
+          detailLevel: "detailed",
+        },
+      );
+      setPreview(response.preview);
+      applyProfileSnapshot(
+        response.profile.fields,
+        response.pre_normalized_profile?.fields ?? response.profile.fields,
+        response.profile.quality,
+        response.profile.recommended_weights,
+        response.profile.weight_notes,
+        response.profile.missing_matrix_preview ?? [],
+        response.profile.missing_rows_preview ?? [],
+        response.pre_normalized_profile?.missing_rows_preview ?? response.profile.missing_rows_preview ?? [],
+        response.profile.correlation_matrix ?? [],
+        response.profile.detail_level === "detailed" ? "detailed" : "summary",
+      );
+    } catch (histogramError) {
+      setError(histogramError instanceof Error ? histogramError.message : "Не удалось обновить график.");
+    } finally {
+      setLoading(false);
+    }
   }
 
   const visibleStages = user?.role === "admin" ? stages : stages.filter((stage) => stage.id !== "admin");

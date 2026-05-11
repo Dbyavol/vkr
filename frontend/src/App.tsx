@@ -2893,7 +2893,9 @@ export function App() {
       if (!effectiveCriteria.length) {
         throw new Error("Выберите хотя бы один критерий для расчета.");
       }
-      const effectiveTopN = analysisMode === "analog_search" ? Math.max(1, analogsCount) : Math.max(preview?.rows_total ?? 0, 10);
+      const effectiveTopN = analysisMode === "analog_search"
+        ? (enableMarketValuation ? Math.max(1, analogsCount) : 10)
+        : Math.max(preview?.rows_total ?? 0, 10);
       if (effectiveFields !== fields) {
         setFields(effectiveFields);
       }
@@ -4220,17 +4222,6 @@ export function App() {
                       />
                     </label>
                   ) : null}
-                  <label>
-                    Количество аналогов
-                    <input
-                      type="number"
-                      min="1"
-                      max="100"
-                      step="1"
-                      value={analogsCount}
-                      onChange={(event) => setAnalogsCount(Math.max(1, Number(event.target.value) || 1))}
-                    />
-                  </label>
                   <label className="checkbox-row">
                     <input
                       type="checkbox"
@@ -4241,14 +4232,27 @@ export function App() {
                   </label>
                   {enableMarketValuation ? (
                     valuationPriceFieldOptions.length ? (
-                      <label>
-                        Колонка со стоимостью
-                        <select value={valuationPriceFieldKey} onChange={(event) => setValuationPriceFieldKey(event.target.value)}>
-                          {valuationPriceFieldOptions.map((field) => (
-                            <option key={field.key} value={field.key}>{field.key}</option>
-                          ))}
-                        </select>
-                      </label>
+                      <>
+                        <label>
+                          Колонка со стоимостью
+                          <select value={valuationPriceFieldKey} onChange={(event) => setValuationPriceFieldKey(event.target.value)}>
+                            {valuationPriceFieldOptions.map((field) => (
+                              <option key={field.key} value={field.key}>{field.key}</option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          Количество аналогов
+                          <input
+                            type="number"
+                            min="1"
+                            max="100"
+                            step="1"
+                            value={analogsCount}
+                            onChange={(event) => setAnalogsCount(Math.max(1, Number(event.target.value) || 1))}
+                          />
+                        </label>
+                      </>
                     ) : (
                       <div className="target-explain">Нет числовых полей, подходящих для оценки стоимости.</div>
                     )

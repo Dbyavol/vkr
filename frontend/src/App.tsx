@@ -7,6 +7,7 @@ import {
   createProject,
   downloadDocxReport,
   fetchRawObjects,
+  searchObjects,
   fetchStoredProfile,
   fetchAdminStats,
   fetchAdminUsers,
@@ -1865,6 +1866,11 @@ export function App() {
   const [result, setResult] = useState<PipelineResult | null>(() => normalizePipelineResult(savedWorkflow.result ?? null));
   const [selectedResultId, setSelectedResultId] = useState(savedWorkflow.result?.ranking?.[0]?.object_id ?? "");
   const [rawResultValuesById, setRawResultValuesById] = useState<Record<string, Record<string, unknown>>>({});
+  const [targetRawValuesById, setTargetRawValuesById] = useState<Record<string, Record<string, unknown>>>({});
+  const [targetSearchQuery, setTargetSearchQuery] = useState("");
+  const [targetSearchResults, setTargetSearchResults] = useState<Array<{ object_id: string; label: string }>>([]);
+  const [targetSearchLoading, setTargetSearchLoading] = useState(false);
+  const [targetSearchOpen, setTargetSearchOpen] = useState(false);
   const [resultsPage, setResultsPage] = useState(1);
   const [lastHistoryId, setLastHistoryId] = useState<number | null>(savedWorkflow.lastHistoryId ?? null);
   const [preprocessingSection, setPreprocessingSection] = useState<PrepSectionId>(savedWorkflow.preprocessingSection === "selection" ? "types" : savedWorkflow.preprocessingSection ?? "types");
@@ -1952,6 +1958,11 @@ export function App() {
     const rows = preview?.normalized_dataset?.rows ?? [];
     return new Map(rows.map((row) => [String(row.id), buildObjectLabel(row, appliedFields)]));
   }, [preview, appliedFields]);
+  const targetSearchLabelKeys = useMemo(() => {
+    const preferred = fields.filter((field) => field.use_in_label).map((field) => field.key);
+    if (preferred.length) return preferred;
+    return fields.filter((field) => field.include_in_output).map((field) => field.key).slice(0, 4);
+  }, [fields]);
   const displayResult = useMemo(() => {
     if (!result) return null;
     return {
@@ -1973,6 +1984,10 @@ export function App() {
   const geoLatitudeKey = useMemo(() => findGeoFieldKey(fields, "geo_latitude"), [fields]);
   const geoLongitudeKey = useMemo(() => findGeoFieldKey(fields, "geo_longitude"), [fields]);
   const geoSearchAvailable = Boolean(geoLatitudeKey && geoLongitudeKey);
+  const targetSearchLabelMap = useMemo(
+    () => new Map(targetSearchResults.map((item) => [item.object_id, item.label])),
+    [targetSearchResults],
+  );
   useEffect(() => {
     if (!enableMarketValuation) return;
     if (valuationPriceFieldKey && valuationPriceFieldOptions.some((field) => field.key === valuationPriceFieldKey)) {
@@ -2000,18 +2015,73 @@ export function App() {
       return changed ? normalized : current;
     });
   }, [excludedScoreCriterionKey]);
+  useEffect(() => {
+    if (activeStage !== "criteria" || analysisMode !== "analog_search" || !datasetFileId) return;
+    let cancelled = false;
+    setTargetSearchLoading(true);
+    const timer = window.setTimeout(() => {
+      void searchObjects(
+        datasetFileId,
+        targetSearchQuery,
+        targetSearchLabelKeys,
+        sourceFilename || preview?.filename || undefined,
+        20,
+      )
+        .then((response) => {
+          if (cancelled) return;
+          setTargetSearchResults(response.items);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setTargetSearchResults([]);
+        })
+        .finally(() => {
+          if (!cancelled) {
+            setTargetSearchLoading(false);
+          }
+        });
+    }, 200);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [activeStage, analysisMode, datasetFileId, targetSearchQuery, targetSearchLabelKeys, sourceFilename, preview]);
+
+  useEffect(() => {
+    if (!datasetFileId || !targetRowId) return;
+    if (targetRawValuesById[targetRowId]) return;
+    void fetchRawObjects(datasetFileId, [targetRowId], sourceFilename || preview?.filename || undefined)
+      .then((response: RawObjectsResponse) => {
+        const values = response.objects?.[targetRowId];
+        if (!values) return;
+        setTargetRawValuesById((current) => ({ ...current, [targetRowId]: values }));
+      })
+      .catch(() => undefined);
+  }, [datasetFileId, targetRowId, sourceFilename, preview, targetRawValuesById]);
+
   const selectedTargetRow = useMemo(
     () => rowsForView(preview, targetValueView).find((row) => row.id === targetRowId) ?? null,
     [preview, targetRowId, targetValueView],
   );
+  const selectedTargetValues = useMemo(
+    () => selectedTargetRow?.values ?? targetRawValuesById[targetRowId] ?? null,
+    [selectedTargetRow, targetRawValuesById, targetRowId],
+  );
+  const selectedTargetTitle = useMemo(
+    () => buildObjectLabelFromValues(targetRowId, targetRawValuesById[targetRowId], appliedFields)
+      || targetSearchLabelMap.get(targetRowId)
+      || objectLabelMap.get(targetRowId)
+      || (targetRowId ? `Объект ${targetRowId}` : ""),
+    [targetRowId, targetRawValuesById, appliedFields, targetSearchLabelMap, objectLabelMap],
+  );
   const selectedTargetPreviewItems = useMemo(() => {
-    if (!selectedTargetRow) return [];
+    if (!selectedTargetValues) return [];
 
     const selectedKeys = new Set<string>();
     const orderedKeys: string[] = [];
     const pushKey = (key: string | null | undefined) => {
       if (!key || selectedKeys.has(key)) return;
-      const value = selectedTargetRow.values[key];
+      const value = selectedTargetValues[key];
       if (value === null || value === undefined || String(value).trim() === "") return;
       selectedKeys.add(key);
       orderedKeys.push(key);
@@ -2030,9 +2100,9 @@ export function App() {
     return orderedKeys.slice(0, 8).map((key) => ({
       key,
       label: humanizeFieldKey(key),
-      value: objectValueLabel(selectedTargetRow.values[key]),
+      value: objectValueLabel(selectedTargetValues[key]),
     }));
-  }, [selectedTargetRow, fields, criteria, geoLatitudeKey, geoLongitudeKey]);
+  }, [selectedTargetValues, fields, criteria, geoLatitudeKey, geoLongitudeKey]);
   const visibleOutlierFieldKeys = useMemo(
     () =>
       fields
@@ -4200,15 +4270,48 @@ export function App() {
               </label>
               {analysisMode === "analog_search" ? (
                 <>
-                  <label>
-                    Целевой объект
-                    <select value={targetRowId} onChange={(event) => setTargetRowId(event.target.value)}>
-                      {(preview?.normalized_dataset?.rows ?? []).map((row) => {
-                        const label = objectLabelMap.get(row.id) || `Объект ${row.id}`;
-                        return <option key={row.id} value={row.id}>{row.id} · {label}</option>;
-                      })}
-                    </select>
-                  </label>
+                  <div className="target-search-field">
+                    <label>
+                      Целевой объект
+                      <input
+                        type="search"
+                        value={targetSearchQuery}
+                        onFocus={() => setTargetSearchOpen(true)}
+                        onBlur={() => window.setTimeout(() => setTargetSearchOpen(false), 120)}
+                        onChange={(event) => {
+                          setTargetSearchQuery(event.target.value);
+                          setTargetSearchOpen(true);
+                        }}
+                        placeholder="Поиск по id или названию"
+                      />
+                    </label>
+                    {targetSearchOpen ? (
+                      <div className="target-search-dropdown">
+                        {targetSearchLoading ? (
+                          <div className="target-search-status">Ищем объекты...</div>
+                        ) : targetSearchResults.length ? (
+                          targetSearchResults.map((item) => (
+                            <button
+                              key={item.object_id}
+                              type="button"
+                              className={`target-search-option${item.object_id === targetRowId ? " active" : ""}`}
+                              onMouseDown={(event) => {
+                                event.preventDefault();
+                                setTargetRowId(item.object_id);
+                                setTargetSearchQuery(item.label);
+                                setTargetSearchOpen(false);
+                              }}
+                            >
+                              <strong>{item.label}</strong>
+                              <span>{item.object_id}</span>
+                            </button>
+                          ))
+                        ) : (
+                          <div className="target-search-status">Ничего не найдено.</div>
+                        )}
+                      </div>
+                    ) : null}
+                  </div>
                   {geoSearchAvailable ? (
                     <label>
                       Радиус, км
@@ -4260,10 +4363,10 @@ export function App() {
                   {enableMarketValuation && valuationPriceFieldKey ? (
                     <div className="target-explain">Поле стоимости исключается из расчета близости и используется только для оценки.</div>
                   ) : null}
-                  {selectedTargetRow ? (
+                  {targetRowId && selectedTargetPreviewItems.length ? (
                     <TargetObjectPreviewCard
-                      objectId={selectedTargetRow.id}
-                      title={objectLabelMap.get(selectedTargetRow.id) || `Объект ${selectedTargetRow.id}`}
+                      objectId={targetRowId}
+                      title={selectedTargetTitle}
                       items={selectedTargetPreviewItems}
                       actions={<ValueViewSwitch value={targetValueView} onChange={setTargetValueView} />}
                     />

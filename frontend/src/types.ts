@@ -133,6 +133,14 @@ export type RawObjectsResponse = {
   objects: Record<string, Record<string, unknown>>;
 };
 
+export type ObjectSearchResponse = {
+  dataset_file_id: number;
+  items: Array<{
+    object_id: string;
+    label: string;
+  }>;
+};
+
 export type PreprocessingRefreshResponse = {
   preview: PreviewResponse;
   profile: DatasetProfileResponse;

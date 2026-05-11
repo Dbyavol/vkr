@@ -155,6 +155,24 @@ class PipelineRawObjectsResponse(BaseModel):
     objects: dict[str, dict[str, Any]]
 
 
+class PipelineObjectSearchRequest(BaseModel):
+    filename: str | None = None
+    dataset_file_id: int
+    query: str = ""
+    label_keys: list[str] = Field(default_factory=list)
+    limit: int = Field(default=20, ge=1, le=100)
+
+
+class PipelineObjectSearchItem(BaseModel):
+    object_id: str
+    label: str
+
+
+class PipelineObjectSearchResponse(BaseModel):
+    dataset_file_id: int
+    items: list[PipelineObjectSearchItem] = Field(default_factory=list)
+
+
 class Contribution(BaseModel):
     key: str
     name: str

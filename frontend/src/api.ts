@@ -12,6 +12,7 @@ import type {
   PipelineResult,
   PreviewResponse,
   ProjectItem,
+  ObjectSearchResponse,
   RawObjectsResponse,
   SystemDashboard,
 } from "./types";
@@ -154,6 +155,32 @@ export async function fetchRawObjects(
 
   if (!response.ok) {
     throw new Error(await readError(response, "Не удалось загрузить исходные значения объекта."));
+  }
+
+  return response.json();
+}
+
+export async function searchObjects(
+  datasetFileId: number,
+  query: string,
+  labelKeys: string[],
+  filename?: string,
+  limit = 20,
+): Promise<ObjectSearchResponse> {
+  const response = await fetch(`${ORCHESTRATOR_URL}/pipeline/object-search`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      dataset_file_id: datasetFileId,
+      filename: filename || null,
+      query,
+      label_keys: labelKeys,
+      limit,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(await readError(response, "Не удалось выполнить поиск объектов."));
   }
 
   return response.json();

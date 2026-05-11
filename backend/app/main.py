@@ -26,6 +26,8 @@ from app.db.session import SessionLocal, engine
 from app.models import files, objects, user  # noqa: F401
 from app.schemas.pipeline import (
     PipelineConfig,
+    PipelineObjectSearchRequest,
+    PipelineObjectSearchResponse,
     PipelinePreprocessRefreshRequest,
     PipelinePreprocessRefreshResponse,
     PipelineProfileStoredResponse,
@@ -39,6 +41,7 @@ from app.schemas.pipeline import (
 )
 from app.services.pipeline_engine import (
     fetch_raw_objects_from_storage,
+    search_objects_from_storage,
     fetch_stored_dataset_profile,
     fetch_system_dashboard,
     refresh_preprocessing_from_storage,
@@ -326,6 +329,35 @@ async def pipeline_raw_objects(payload: PipelineRawObjectsRequest) -> PipelineRa
             exc_info=True,
         )
         raise HTTPException(status_code=400, detail={"code": "PIPELINE_RAW_OBJECTS_ERROR", "message": str(exc)}) from exc
+
+
+@app.post(f"{settings.api_prefix}/pipeline/object-search", response_model=PipelineObjectSearchResponse)
+async def pipeline_object_search(payload: PipelineObjectSearchRequest) -> PipelineObjectSearchResponse:
+    try:
+        data = await search_objects_from_storage(
+            dataset_file_id=payload.dataset_file_id,
+            filename=payload.filename,
+            query=payload.query,
+            label_keys=payload.label_keys,
+            limit=payload.limit,
+        )
+        log_audit_event(
+            "pipeline_object_search",
+            dataset_file_id=payload.dataset_file_id,
+            filename=payload.filename or "dataset",
+            query=payload.query,
+            limit=payload.limit,
+        )
+        return PipelineObjectSearchResponse.model_validate(data)
+    except ValueError as exc:
+        request_logger.error(
+            "pipeline_object_search_failed dataset_file_id=%r filename=%r query=%r",
+            payload.dataset_file_id,
+            payload.filename or "dataset",
+            payload.query,
+            exc_info=True,
+        )
+        raise HTTPException(status_code=400, detail={"code": "PIPELINE_OBJECT_SEARCH_ERROR", "message": str(exc)}) from exc
 
 
 @app.post(f"{settings.api_prefix}/pipeline/run", response_model=PipelineRunResponse)

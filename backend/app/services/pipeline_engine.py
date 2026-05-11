@@ -488,6 +488,70 @@ async def fetch_raw_objects_from_storage(
     }
 
 
+def _build_object_search_label(values: dict[str, Any], label_keys: list[str]) -> str:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for key in label_keys:
+        if key in seen:
+            continue
+        seen.add(key)
+        value = values.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            ordered.append(text)
+    if not ordered:
+        for key, value in values.items():
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                ordered.append(text)
+            if len(ordered) >= 3:
+                break
+    return " · ".join(ordered) if ordered else "Объект"
+
+
+async def search_objects_from_storage(
+    *,
+    dataset_file_id: int,
+    filename: str | None,
+    query: str,
+    label_keys: list[str],
+    limit: int,
+) -> dict[str, Any]:
+    started_at = start_timer()
+    metadata = await fetch_stored_file_metadata(file_id=dataset_file_id)
+    resolved_filename = filename or metadata.get("original_name") or "dataset"
+    body = await fetch_stored_file_body(file_id=dataset_file_id)
+    raw_preview = await fetch_preview(filename=resolved_filename, body=body)
+    rows = list((raw_preview.get("normalized_dataset") or {}).get("rows") or [])
+    normalized_query = query.strip().lower()
+    items: list[dict[str, str]] = []
+    for row in rows:
+        values = dict(row.get("values") or {})
+        label = _build_object_search_label(values, label_keys)
+        haystack = f"{row.get('id', '')} {label}".lower()
+        if normalized_query and normalized_query not in haystack:
+            continue
+        items.append({"object_id": str(row.get("id")), "label": label})
+        if len(items) >= limit:
+            break
+    pipeline_logger.info(
+        "search_objects_from_storage_completed dataset_file_id=%r filename=%r query=%r returned=%r duration_ms=%.2f",
+        dataset_file_id,
+        resolved_filename,
+        query,
+        len(items),
+        elapsed_ms(started_at),
+    )
+    return {
+        "dataset_file_id": dataset_file_id,
+        "items": items,
+    }
+
+
 async def analyze_dataset(
     *,
     rows: list[dict[str, Any]],

@@ -69,7 +69,6 @@ def _detect_csv_text_and_delimiter(body: bytes) -> tuple[str, str]:
     try:
         text = body.decode("utf-8-sig")
     except UnicodeDecodeError:
-        # Many Russian public datasets are exported in cp1251.
         text = body.decode("cp1251")
 
     sample = text[:4096]

@@ -192,7 +192,7 @@ def preprocess_rows(
             removed_missing = int(missing_mask.sum())
             if removed_missing:
                 df = df.loc[~missing_mask].copy()
-                report.notes.append("Rows with missing values were removed")
+                report.notes.append("Записи с пропусками удалены")
         elif config.missing_strategy != "none":
             fill_value: Any = None
             if config.missing_strategy == "mean":
@@ -208,7 +208,7 @@ def preprocess_rows(
                 fill_value = config.missing_constant
             if fill_value is not None:
                 df.loc[missing_mask, config.key] = fill_value
-                report.notes.append(f"Missing values filled using {config.missing_strategy}")
+                report.notes.append(f"Пропуски заполнены с помощью {config.missing_strategy}")
 
         removed_outliers = 0
         clipped = 0

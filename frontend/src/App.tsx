@@ -1956,8 +1956,8 @@ export function App() {
   );
   const objectLabelMap = useMemo(() => {
     const rows = preview?.normalized_dataset?.rows ?? [];
-    return new Map(rows.map((row) => [String(row.id), buildObjectLabel(row, appliedFields)]));
-  }, [preview, appliedFields]);
+    return new Map(rows.map((row) => [String(row.id), buildObjectLabel(row, fields)]));
+  }, [preview, fields]);
   const targetSearchLabelKeys = useMemo(() => {
     const preferred = fields.filter((field) => field.use_in_label).map((field) => field.key);
     if (preferred.length) return preferred;
@@ -1968,14 +1968,14 @@ export function App() {
     return {
       ...result,
       ranking: result.ranking.map((item) => {
-        const rawLabel = buildObjectLabelFromValues(item.object_id, rawResultValuesById[item.object_id], appliedFields);
+        const rawLabel = buildObjectLabelFromValues(item.object_id, rawResultValuesById[item.object_id], fields);
         return {
           ...item,
           title: rawLabel || objectLabelMap.get(String(item.object_id)) || item.title || `Объект ${item.object_id}`,
         };
       }),
     };
-  }, [result, rawResultValuesById, appliedFields, objectLabelMap]);
+  }, [result, rawResultValuesById, fields, objectLabelMap]);
   const selectedDisplayResult = useMemo(
     () => displayResult?.ranking.find((item) => item.object_id === selectedResultId) ?? displayResult?.ranking[0],
     [displayResult, selectedResultId],
@@ -2068,11 +2068,11 @@ export function App() {
     [selectedTargetRow, targetRawValuesById, targetRowId],
   );
   const selectedTargetTitle = useMemo(
-    () => buildObjectLabelFromValues(targetRowId, targetRawValuesById[targetRowId], appliedFields)
+    () => buildObjectLabelFromValues(targetRowId, targetRawValuesById[targetRowId], fields)
       || targetSearchLabelMap.get(targetRowId)
       || objectLabelMap.get(targetRowId)
       || (targetRowId ? `Объект ${targetRowId}` : ""),
-    [targetRowId, targetRawValuesById, appliedFields, targetSearchLabelMap, objectLabelMap],
+    [targetRowId, targetRawValuesById, fields, targetSearchLabelMap, objectLabelMap],
   );
   const selectedTargetPreviewItems = useMemo(() => {
     if (!selectedTargetValues) return [];
